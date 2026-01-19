@@ -230,6 +230,10 @@ class ContextQueryResult(BaseModel):
         ge=0,
         description="Number of stored summaries used instead of full content",
     )
+    timing: dict[str, int] | None = Field(
+        default=None,
+        description="Timing breakdown in milliseconds (embed_ms, search_ms, score_ms, total_ms)",
+    )
 
 
 # ============ RECURSIVE CONTEXT MODELS (Phase 4.5) ============

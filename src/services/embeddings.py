@@ -6,7 +6,9 @@ Model: all-MiniLM-L6-v2 (384 dimensions, fast and efficient)
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -19,6 +21,13 @@ logger = logging.getLogger(__name__)
 # Model configuration
 MODEL_NAME = "all-MiniLM-L6-v2"
 EMBEDDING_DIMENSION = 384
+
+# Timeout configuration (in seconds)
+EMBEDDING_TIMEOUT_SINGLE = 5.0  # Timeout for single text embedding
+EMBEDDING_TIMEOUT_BATCH = 30.0  # Timeout for batch embedding (larger texts)
+
+# Thread pool for embedding operations
+_embedding_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="embedding")
 
 
 class EmbeddingsService:
@@ -58,7 +67,7 @@ class EmbeddingsService:
         return self._model
 
     def embed_text(self, text: str) -> list[float]:
-        """Generate embedding for a single text.
+        """Generate embedding for a single text (synchronous).
 
         Args:
             text: The text to embed.
@@ -71,7 +80,7 @@ class EmbeddingsService:
         return embedding.tolist()
 
     def embed_texts(self, texts: list[str], batch_size: int = 32) -> list[list[float]]:
-        """Generate embeddings for multiple texts.
+        """Generate embeddings for multiple texts (synchronous).
 
         Args:
             texts: List of texts to embed.
@@ -91,6 +100,67 @@ class EmbeddingsService:
             show_progress_bar=False,
         )
         return [emb.tolist() for emb in embeddings]
+
+    async def embed_text_async(
+        self, text: str, timeout: float = EMBEDDING_TIMEOUT_SINGLE
+    ) -> list[float]:
+        """Generate embedding for a single text with timeout protection.
+
+        Args:
+            text: The text to embed.
+            timeout: Maximum time to wait for embedding (default: 5 seconds).
+
+        Returns:
+            List of floats representing the embedding vector (384 dimensions).
+
+        Raises:
+            asyncio.TimeoutError: If embedding takes longer than timeout.
+        """
+        loop = asyncio.get_event_loop()
+        try:
+            result = await asyncio.wait_for(
+                loop.run_in_executor(_embedding_executor, self.embed_text, text),
+                timeout=timeout,
+            )
+            return result
+        except asyncio.TimeoutError:
+            logger.warning(f"Embedding timed out after {timeout}s for text of length {len(text)}")
+            raise
+
+    async def embed_texts_async(
+        self, texts: list[str], batch_size: int = 32, timeout: float = EMBEDDING_TIMEOUT_BATCH
+    ) -> list[list[float]]:
+        """Generate embeddings for multiple texts with timeout protection.
+
+        Args:
+            texts: List of texts to embed.
+            batch_size: Number of texts to process at once.
+            timeout: Maximum time to wait for embeddings (default: 30 seconds).
+
+        Returns:
+            List of embedding vectors.
+
+        Raises:
+            asyncio.TimeoutError: If embedding takes longer than timeout.
+        """
+        if not texts:
+            return []
+
+        loop = asyncio.get_event_loop()
+        try:
+            result = await asyncio.wait_for(
+                loop.run_in_executor(
+                    _embedding_executor,
+                    lambda: self.embed_texts(texts, batch_size),
+                ),
+                timeout=timeout,
+            )
+            return result
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Batch embedding timed out after {timeout}s for {len(texts)} texts"
+            )
+            raise
 
     def cosine_similarity(
         self,

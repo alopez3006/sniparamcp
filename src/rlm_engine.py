@@ -129,7 +129,7 @@ class RLMEngine:
 
         documents = await db.document.find_many(
             where={"projectId": self.project_id},
-            order_by={"path": "asc"},
+            order={"path": "asc"},
         )
 
         self.index = DocumentationIndex()
@@ -203,12 +203,8 @@ class RLMEngine:
         context_entries = await db.sessioncontext.find_many(
             where={
                 "projectId": self.project_id,
-                "OR": [
-                    {"expiresAt": None},
-                    {"expiresAt": {"gt": datetime.utcnow()}},
-                ],
             },
-            order_by={"createdAt": "asc"},
+            order={"createdAt": "asc"},
         )
 
         if context_entries:
@@ -306,11 +302,40 @@ class RLMEngine:
 
     async def _handle_search(self, params: dict[str, Any]) -> ToolResult:
         """Handle rlm_search - search for patterns."""
+        from .config import settings
+
         pattern = params.get("pattern", "")
         max_results = params.get("max_results", 20)
 
         if not self.index:
             return ToolResult(data="No documentation loaded", input_tokens=0, output_tokens=0)
+
+        # Security: Validate pattern length to prevent ReDoS
+        if len(pattern) > settings.max_regex_pattern_length:
+            return ToolResult(
+                data=f"Invalid regex pattern: Pattern too long (max {settings.max_regex_pattern_length} characters)",
+                input_tokens=0,
+                output_tokens=0,
+            )
+
+        # Security: Check for potentially dangerous regex patterns
+        dangerous_patterns = [
+            r"(.+)+",  # Nested quantifiers
+            r"(.*)*",
+            r"(.+)*",
+            r"(.*)+",
+            r"([a-zA-Z]+)*",  # Repeated groups with quantifiers
+            r"(a+)+",
+            r"(a*)*",
+        ]
+        pattern_lower = pattern.lower()
+        for dangerous in dangerous_patterns:
+            if dangerous in pattern_lower or dangerous.replace("a", "[a-z]") in pattern_lower:
+                return ToolResult(
+                    data="Invalid regex pattern: Pattern contains potentially unsafe constructs (nested quantifiers)",
+                    input_tokens=0,
+                    output_tokens=0,
+                )
 
         try:
             regex = re.compile(pattern, re.IGNORECASE)
@@ -319,14 +344,36 @@ class RLMEngine:
 
         results: list[dict[str, Any]] = []
 
-        for i, line in enumerate(self.index.lines, start=1):
-            if regex.search(line):
-                results.append({
-                    "line_number": i,
-                    "content": line.strip(),
-                })
-                if len(results) >= max_results:
-                    break
+        # Execute search with timeout protection using thread pool
+        def search_sync():
+            """Synchronous search function to run in thread pool."""
+            for i, line in enumerate(self.index.lines, start=1):
+                # Limit line length to prevent ReDoS on very long lines
+                search_line = line[:10000] if len(line) > 10000 else line
+                try:
+                    if regex.search(search_line):
+                        results.append({
+                            "line_number": i,
+                            "content": line.strip()[:500],  # Limit content length in results
+                        })
+                        if len(results) >= max_results:
+                            break
+                except Exception:
+                    # Skip lines that cause regex issues
+                    continue
+
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(search_sync),
+                timeout=settings.regex_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"Regex search timed out for pattern: {pattern[:50]}...")
+            return ToolResult(
+                data="Search timed out. Try a simpler pattern.",
+                input_tokens=len(pattern) // 4,
+                output_tokens=10,
+            )
 
         response = {
             "pattern": pattern,
@@ -1551,7 +1598,7 @@ class RLMEngine:
         summaries = await db.documentsummary.find_many(
             where=where_clause,
             include={"document": True},
-            order_by={"createdAt": "desc"},
+            order={"createdAt": "desc"},
         )
 
         # Build response

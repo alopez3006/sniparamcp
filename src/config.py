@@ -25,9 +25,22 @@ class Settings(BaseSettings):
     port: int = 8000
     debug: bool = False
 
+    # CORS - comma-separated list of allowed origins
+    # In production, this MUST be set explicitly (not "*")
+    cors_allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+
     # Rate limiting
     rate_limit_requests: int = 100  # requests per minute per API key
     rate_limit_window: int = 60  # seconds
+
+    # Security: Max JSON payload size for SSE params (in bytes)
+    max_json_payload_size: int = 102400  # 100KB
+
+    # Security: Regex execution timeout (in seconds)
+    regex_timeout: float = 1.0
+
+    # Security: Max regex pattern length
+    max_regex_pattern_length: int = 500
 
     # Plan limits (queries per month)
     plan_limits: dict[str, int] = {
@@ -36,6 +49,13 @@ class Settings(BaseSettings):
         "TEAM": 20000,
         "ENTERPRISE": -1,  # unlimited
     }
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        """Get CORS origins as a list."""
+        if self.cors_allowed_origins == "*":
+            return ["*"]
+        return [origin.strip() for origin in self.cors_allowed_origins.split(",") if origin.strip()]
 
 
 @lru_cache

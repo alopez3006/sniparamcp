@@ -27,14 +27,11 @@ async def validate_api_key(api_key: str, project_id: str) -> dict | None:
     # Hash the provided key to compare with stored hash
     key_hash = hash_api_key(api_key)
 
-    # Find the API key by hash
+    # Find the API key by hash and project
     api_key_record = await db.apikey.find_first(
         where={
             "keyHash": key_hash,
-            "OR": [
-                {"projectId": project_id},
-                {"projectId": None},  # Global API key (no project restriction)
-            ],
+            "projectId": project_id,
         },
         include={
             "project": {

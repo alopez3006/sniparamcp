@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -127,7 +128,7 @@ class DocumentIndexer:
         query: str,
         limit: int = 10,
         min_similarity: float = 0.3,
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         """
         Search for chunks similar to the query using cosine similarity.
 
@@ -138,14 +139,17 @@ class DocumentIndexer:
             min_similarity: Minimum cosine similarity (0-1).
 
         Returns:
-            List of matching chunks with similarity scores.
+            Dict with 'results' (list of matching chunks) and 'timing' (performance metrics).
         """
-        # Generate embedding for query
+        # Time embedding generation
+        embed_start = time.perf_counter()
         query_embedding = self.embeddings.embed_text(query)
+        embed_ms = int((time.perf_counter() - embed_start) * 1000)
+
         embedding_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
 
-        # Search using pgvector cosine similarity
-        # Note: <=> is cosine distance (1 - similarity), so we need to convert
+        # Time vector search query
+        search_start = time.perf_counter()
         results = await self.db.query_raw(
             f'''
             SELECT
@@ -169,20 +173,34 @@ class DocumentIndexer:
             min_similarity,
             limit,
         )
+        search_ms = int((time.perf_counter() - search_start) * 1000)
 
-        return [
-            {
-                "id": row["id"],
-                "content": row["content"],
-                "start_line": row["startLine"],
-                "end_line": row["endLine"],
-                "token_count": row["tokenCount"],
-                "title": row["title"],
-                "file_path": row["file_path"],
-                "similarity": float(row["similarity"]),
-            }
-            for row in results
-        ]
+        # Log timing for monitoring
+        logger.info(
+            f"vector_search: project={project_id} results={len(results)} "
+            f"embed_ms={embed_ms} search_ms={search_ms} total_ms={embed_ms + search_ms}"
+        )
+
+        return {
+            "results": [
+                {
+                    "id": row["id"],
+                    "content": row["content"],
+                    "start_line": row["startLine"],
+                    "end_line": row["endLine"],
+                    "token_count": row["tokenCount"],
+                    "title": row["title"],
+                    "file_path": row["file_path"],
+                    "similarity": float(row["similarity"]),
+                }
+                for row in results
+            ],
+            "timing": {
+                "embed_ms": embed_ms,
+                "search_ms": search_ms,
+                "total_ms": embed_ms + search_ms,
+            },
+        }
 
     def _chunk_document(self, content: str, file_path: str) -> list[Chunk]:
         """

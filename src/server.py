@@ -2,14 +2,17 @@
 
 import asyncio
 import json
+import logging
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Annotated, AsyncGenerator
+from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import __version__
 from .auth import get_project_with_team, validate_api_key
@@ -32,12 +35,87 @@ from .usage import (
     get_usage_stats,
     track_usage,
 )
+from .mcp_transport import router as mcp_router
+
+logger = logging.getLogger(__name__)
+
+
+# ============ SECURITY HELPERS ============
+
+
+def sanitize_error_message(error: Exception) -> str:
+    """
+    Sanitize error messages to prevent information disclosure.
+
+    Returns a generic message for unexpected errors while preserving
+    useful information for known error types.
+    """
+    error_str = str(error)
+
+    # Known safe error patterns that can be returned to client
+    safe_patterns = [
+        "Invalid API key",
+        "Project not found",
+        "Rate limit exceeded",
+        "Monthly usage limit exceeded",
+        "Invalid tool name",
+        "Invalid regex pattern",
+        "No documentation loaded",
+        "Unknown tool",
+        "Invalid parameter",
+        "Token budget",
+        "Plan does not support",
+    ]
+
+    for pattern in safe_patterns:
+        if pattern.lower() in error_str.lower():
+            return error_str
+
+    # Log the actual error for debugging
+    logger.error(f"Tool execution error: {error}", exc_info=True)
+
+    # Return generic message for unknown errors
+    return "An error occurred processing your request. Please try again."
+
+
+# ============ SECURITY MIDDLEWARE ============
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add security headers to all responses."""
+
+    async def dispatch(self, request: Request, call_next):
+        # Generate request ID for tracing
+        request_id = str(uuid4())
+
+        response = await call_next(request)
+
+        # Add security headers
+        response.headers["X-Request-ID"] = request_id
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+
+        # Add HSTS in production (non-debug mode)
+        if not settings.debug:
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+
+        return response
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown."""
     # Startup
+    logger.info(f"Starting RLM MCP Server v{__version__}")
+
+    # Validate CORS configuration in production
+    if not settings.debug and settings.cors_allowed_origins == "*":
+        logger.warning(
+            "SECURITY WARNING: CORS is configured to allow all origins ('*'). "
+            "Set CORS_ALLOWED_ORIGINS to specific domains in production."
+        )
+
     await get_db()  # Initialize database connection
     yield
     # Shutdown
@@ -52,14 +130,20 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS middleware
+# Security headers middleware (applied first)
+app.add_middleware(SecurityHeadersMiddleware)
+
+# CORS middleware - use configured origins instead of wildcard
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-API-Key"],
 )
+
+# Mount MCP Streamable HTTP transport
+app.include_router(mcp_router)
 
 
 # ============ DEPENDENCY INJECTION ============
@@ -70,6 +154,44 @@ async def get_api_key(
 ) -> str:
     """Extract API key from header."""
     return x_api_key
+
+
+async def validate_and_rate_limit(
+    project_id: str,
+    api_key: str,
+) -> tuple[dict, any, Plan]:
+    """
+    Common validation logic for all endpoints.
+    Validates API key, gets project, and checks rate limit.
+
+    Returns:
+        Tuple of (api_key_info, project, plan)
+
+    Raises:
+        HTTPException on validation failure
+    """
+    # 1. Validate API key
+    api_key_info = await validate_api_key(api_key, project_id)
+    if not api_key_info:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    # 2. Get project with team subscription
+    project = await get_project_with_team(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # 3. Check rate limit
+    rate_ok = await check_rate_limit(api_key_info["id"])
+    if not rate_ok:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded: {settings.rate_limit_requests} requests per minute",
+        )
+
+    # 4. Determine plan
+    plan = Plan(project.team.subscription.plan if project.team.subscription else "FREE")
+
+    return api_key_info, project, plan
 
 
 # ============ EXCEPTION HANDLERS ============
@@ -83,6 +205,20 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         content={
             "success": False,
             "error": exc.detail,
+            "usage": {"latency_ms": 0},
+        },
+    )
+
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    """Handle unexpected exceptions with sanitized error messages."""
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "success": False,
+            "error": "An internal server error occurred. Please try again.",
             "usage": {"latency_ms": 0},
         },
     )
@@ -137,26 +273,10 @@ async def mcp_endpoint(
     """
     start_time = time.perf_counter()
 
-    # 1. Validate API key
-    api_key_info = await validate_api_key(api_key, project_id)
-    if not api_key_info:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+    # Validate API key, project, and rate limit
+    api_key_info, project, plan = await validate_and_rate_limit(project_id, api_key)
 
-    # 2. Get project with team subscription
-    project = await get_project_with_team(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    # 3. Check rate limit
-    rate_ok = await check_rate_limit(api_key_info["id"])
-    if not rate_ok:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Rate limit exceeded: {settings.rate_limit_requests} requests per minute",
-        )
-
-    # 4. Check usage limits
-    plan = Plan(project.team.subscription.plan if project.team.subscription else "FREE")
+    # Check usage limits
     limits = await check_usage_limits(project_id, plan)
     if limits.exceeded:
         raise HTTPException(
@@ -164,14 +284,14 @@ async def mcp_endpoint(
             detail=f"Monthly usage limit exceeded: {limits.current}/{limits.max} queries. Upgrade your plan to continue.",
         )
 
-    # 5. Execute the tool
+    # Execute the tool
     try:
         engine = RLMEngine(project_id, plan=plan)
         result = await engine.execute(request.tool, request.params)
 
         latency_ms = int((time.perf_counter() - start_time) * 1000)
 
-        # 6. Track usage
+        # Track usage
         await track_usage(
             project_id=project_id,
             tool=request.tool.value,
@@ -194,7 +314,7 @@ async def mcp_endpoint(
     except Exception as e:
         latency_ms = int((time.perf_counter() - start_time) * 1000)
 
-        # Track failed request
+        # Track failed request (log full error internally)
         await track_usage(
             project_id=project_id,
             tool=request.tool.value,
@@ -202,12 +322,13 @@ async def mcp_endpoint(
             output_tokens=0,
             latency_ms=latency_ms,
             success=False,
-            error=str(e),
+            error=str(e),  # Full error for internal logging
         )
 
+        # Return sanitized error to client
         return MCPResponse(
             success=False,
-            error=str(e),
+            error=sanitize_error_message(e),
             usage=UsageInfo(latency_ms=latency_ms),
         )
 
@@ -227,10 +348,8 @@ async def get_context(
     Returns:
         Current session context
     """
-    # Validate API key
-    api_key_info = await validate_api_key(api_key, project_id)
-    if not api_key_info:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+    # Validate API key, project, and rate limit
+    await validate_and_rate_limit(project_id, api_key)
 
     engine = RLMEngine(project_id)
     await engine.load_session_context()
@@ -257,17 +376,9 @@ async def get_limits(
     Returns:
         Current usage and limits
     """
-    # Validate API key
-    api_key_info = await validate_api_key(api_key, project_id)
-    if not api_key_info:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+    # Validate API key, project, and rate limit
+    _, _, plan = await validate_and_rate_limit(project_id, api_key)
 
-    # Get project subscription
-    project = await get_project_with_team(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    plan = Plan(project.team.subscription.plan if project.team.subscription else "FREE")
     return await check_usage_limits(project_id, plan)
 
 
@@ -275,7 +386,7 @@ async def get_limits(
 async def get_stats(
     project_id: str,
     api_key: Annotated[str, Depends(get_api_key)],
-    days: int = 30,
+    days: int = Query(default=30, ge=1, le=365, description="Number of days to look back"),
 ):
     """
     Get usage statistics for a project.
@@ -283,15 +394,13 @@ async def get_stats(
     Args:
         project_id: The project ID
         api_key: API key from X-API-Key header
-        days: Number of days to look back (default: 30)
+        days: Number of days to look back (default: 30, max: 365)
 
     Returns:
         Usage statistics
     """
-    # Validate API key
-    api_key_info = await validate_api_key(api_key, project_id)
-    if not api_key_info:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+    # Validate API key, project, and rate limit
+    await validate_and_rate_limit(project_id, api_key)
 
     stats = await get_usage_stats(project_id, days)
     return {"project_id": project_id, **stats}
@@ -353,8 +462,8 @@ async def sse_event_generator(
             error=str(e),
         )
 
-        # Send error event
-        yield f"data: {json.dumps({'type': 'error', 'error': str(e), 'usage': {'latency_ms': latency_ms}})}\n\n"
+        # Send sanitized error event
+        yield f"data: {json.dumps({'type': 'error', 'error': sanitize_error_message(e), 'usage': {'latency_ms': latency_ms}})}\n\n"
 
     # Send done event to signal stream end
     yield f"data: {json.dumps({'type': 'done'})}\n\n"
@@ -382,26 +491,10 @@ async def mcp_sse_endpoint(
     Returns:
         SSE stream with tool execution events
     """
-    # 1. Validate API key
-    api_key_info = await validate_api_key(api_key, project_id)
-    if not api_key_info:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+    # Validate API key, project, and rate limit
+    _, _, plan = await validate_and_rate_limit(project_id, api_key)
 
-    # 2. Get project with team subscription
-    project = await get_project_with_team(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    # 3. Check rate limit
-    rate_ok = await check_rate_limit(api_key_info["id"])
-    if not rate_ok:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Rate limit exceeded: {settings.rate_limit_requests} requests per minute",
-        )
-
-    # 4. Check usage limits
-    plan = Plan(project.team.subscription.plan if project.team.subscription else "FREE")
+    # Check usage limits
     limits = await check_usage_limits(project_id, plan)
     if limits.exceeded:
         raise HTTPException(
@@ -409,7 +502,14 @@ async def mcp_sse_endpoint(
             detail=f"Monthly usage limit exceeded: {limits.current}/{limits.max} queries. Upgrade your plan to continue.",
         )
 
-    # 5. Parse tool name
+    # Validate JSON payload size before parsing
+    if len(params) > settings.max_json_payload_size:
+        raise HTTPException(
+            status_code=413,
+            detail=f"JSON payload too large. Maximum size: {settings.max_json_payload_size} bytes",
+        )
+
+    # Parse tool name
     try:
         tool_name = ToolName(tool)
     except ValueError:
@@ -418,16 +518,16 @@ async def mcp_sse_endpoint(
             detail=f"Invalid tool name: {tool}. Valid tools: {[t.value for t in ToolName]}",
         )
 
-    # 6. Parse params
+    # Parse params with error sanitization
     try:
         parsed_params = json.loads(params)
-    except json.JSONDecodeError as e:
+    except json.JSONDecodeError:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid JSON in params: {str(e)}",
+            detail="Invalid JSON format in params parameter",
         )
 
-    # 7. Return SSE stream
+    # Return SSE stream
     return StreamingResponse(
         sse_event_generator(project_id, tool_name, parsed_params, plan),
         media_type="text/event-stream",
@@ -458,26 +558,10 @@ async def mcp_sse_endpoint_post(
     Returns:
         SSE stream with tool execution events
     """
-    # 1. Validate API key
-    api_key_info = await validate_api_key(api_key, project_id)
-    if not api_key_info:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+    # Validate API key, project, and rate limit
+    _, _, plan = await validate_and_rate_limit(project_id, api_key)
 
-    # 2. Get project with team subscription
-    project = await get_project_with_team(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    # 3. Check rate limit
-    rate_ok = await check_rate_limit(api_key_info["id"])
-    if not rate_ok:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Rate limit exceeded: {settings.rate_limit_requests} requests per minute",
-        )
-
-    # 4. Check usage limits
-    plan = Plan(project.team.subscription.plan if project.team.subscription else "FREE")
+    # Check usage limits
     limits = await check_usage_limits(project_id, plan)
     if limits.exceeded:
         raise HTTPException(
@@ -485,7 +569,7 @@ async def mcp_sse_endpoint_post(
             detail=f"Monthly usage limit exceeded: {limits.current}/{limits.max} queries. Upgrade your plan to continue.",
         )
 
-    # 5. Return SSE stream
+    # Return SSE stream
     return StreamingResponse(
         sse_event_generator(project_id, request.tool, request.params, plan),
         media_type="text/event-stream",
