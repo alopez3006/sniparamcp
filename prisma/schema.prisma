@@ -1,0 +1,293 @@
+// Prisma schema for MCP Server (Python client)
+// This should mirror the main schema in packages/database
+
+generator client {
+  provider             = "prisma-client-py"
+  interface            = "asyncio"
+  recursive_type_depth = 5
+  previewFeatures      = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
+}
+
+// ============================================
+// User & Auth Models (read-only for MCP server)
+// ============================================
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts    Account[]
+  sessions    Session[]
+  teamMembers TeamMember[]
+  apiKeys     ApiKey[]
+
+  @@map("users")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ============================================
+// Team Models
+// ============================================
+
+model Team {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  image     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members      TeamMember[]
+  invites      TeamInvite[]
+  projects     Project[]
+  subscription Subscription?
+
+  @@map("teams")
+}
+
+model TeamMember {
+  id        String   @id @default(cuid())
+  role      Role     @default(MEMBER)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId String
+  teamId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  team   Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, teamId])
+  @@map("team_members")
+}
+
+model TeamInvite {
+  id        String   @id @default(cuid())
+  email     String
+  role      Role     @default(MEMBER)
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  teamId String
+  team   Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@unique([email, teamId])
+  @@map("team_invites")
+}
+
+enum Role {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+// ============================================
+// Project Models
+// ============================================
+
+model Project {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String
+  description String?
+  githubRepo  String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  teamId         String
+  team           Team             @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  documents      Document[]
+  sessionContext SessionContext[]
+  apiKeys        ApiKey[]
+  queries        Query[]
+
+  @@unique([teamId, slug])
+  @@map("projects")
+}
+
+model Document {
+  id        String   @id @default(cuid())
+  path      String
+  content   String   @db.Text
+  hash      String
+  size      Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  chunks    DocumentChunk[]
+
+  @@unique([projectId, path])
+  @@index([projectId])
+  @@map("documents")
+}
+
+/// Document chunk with embedding for semantic search
+/// Note: embedding field uses raw SQL via pgvector extension
+model DocumentChunk {
+  id         String                    @id @default(cuid())
+  content    String                    @db.Text
+  embedding  Unsupported("vector(384)")
+  startLine  Int
+  endLine    Int
+  tokenCount Int
+  title      String?
+  createdAt  DateTime                  @default(now())
+
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId])
+  @@map("document_chunks")
+}
+
+model SessionContext {
+  id        String    @id @default(cuid())
+  key       String
+  value     String    @db.Text
+  expiresAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, key])
+  @@index([projectId])
+  @@map("session_contexts")
+}
+
+// ============================================
+// API Key Models
+// ============================================
+
+model ApiKey {
+  id         String    @id @default(cuid())
+  name       String
+  keyHash    String    @unique
+  keyPrefix  String
+  lastUsedAt DateTime?
+  expiresAt  DateTime?
+  createdAt  DateTime  @default(now())
+  revokedAt  DateTime?
+
+  userId    String
+  projectId String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([keyHash])
+  @@map("api_keys")
+}
+
+// ============================================
+// Usage Tracking Models
+// ============================================
+
+model Query {
+  id           String   @id @default(cuid())
+  tool         String
+  inputTokens  Int
+  outputTokens Int
+  latencyMs    Int
+  success      Boolean
+  errorMessage String?
+  createdAt    DateTime @default(now())
+
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, createdAt])
+  @@index([createdAt])
+  @@map("queries")
+}
+
+// ============================================
+// Billing Models
+// ============================================
+
+model Subscription {
+  id                   String             @id @default(cuid())
+  plan                 Plan               @default(FREE)
+  status               SubscriptionStatus @default(ACTIVE)
+  stripeCustomerId     String?
+  stripeSubscriptionId String?            @unique
+  stripePriceId        String?
+  currentPeriodStart   DateTime?
+  currentPeriodEnd     DateTime?
+  cancelAtPeriodEnd    Boolean            @default(false)
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  teamId String @unique
+  team   Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@map("subscriptions")
+}
+
+enum Plan {
+  FREE
+  PRO
+  TEAM
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELED
+  PAST_DUE
+  TRIALING
+  UNPAID
+}
