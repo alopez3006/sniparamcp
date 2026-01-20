@@ -30,6 +30,10 @@ class ToolName(str, Enum):
     RLM_STORE_SUMMARY = "rlm_store_summary"
     RLM_GET_SUMMARIES = "rlm_get_summaries"
     RLM_DELETE_SUMMARY = "rlm_delete_summary"
+    # Phase 5: Document Upload Tools
+    RLM_UPLOAD_DOCUMENT = "rlm_upload_document"
+    RLM_SYNC_DOCUMENTS = "rlm_sync_documents"
+    RLM_SETTINGS = "rlm_settings"
 
 
 class SearchMode(str, Enum):
@@ -515,4 +519,68 @@ class DeleteSummaryResult(BaseModel):
     """Result of rlm_delete_summary tool."""
 
     deleted_count: int = Field(default=0, ge=0, description="Number of summaries deleted")
+    message: str = Field(..., description="Human-readable status message")
+
+
+# ============ DOCUMENT UPLOAD MODELS (Phase 5) ============
+
+
+class UploadDocumentParams(BaseModel):
+    """Parameters for rlm_upload_document tool."""
+
+    path: str = Field(
+        ...,
+        description="Document path relative to project root (e.g., 'docs/api.md')",
+    )
+    content: str = Field(..., min_length=1, description="Document content (markdown)")
+
+
+class UploadDocumentResult(BaseModel):
+    """Result of rlm_upload_document tool."""
+
+    path: str = Field(..., description="Document path")
+    action: str = Field(..., description="Action taken: 'created' or 'updated'")
+    size: int = Field(..., ge=0, description="Document size in bytes")
+    hash: str = Field(..., description="Content hash")
+    message: str = Field(..., description="Human-readable status message")
+
+
+class SyncDocumentItem(BaseModel):
+    """A document to sync."""
+
+    path: str = Field(..., description="Document path")
+    content: str = Field(..., description="Document content")
+
+
+class SyncDocumentsParams(BaseModel):
+    """Parameters for rlm_sync_documents tool."""
+
+    documents: list[SyncDocumentItem] = Field(
+        ..., min_length=1, max_length=100, description="Documents to sync"
+    )
+    delete_missing: bool = Field(
+        default=False,
+        description="Delete documents not in the sync list",
+    )
+
+
+class SyncDocumentsResult(BaseModel):
+    """Result of rlm_sync_documents tool."""
+
+    created: int = Field(default=0, ge=0, description="Documents created")
+    updated: int = Field(default=0, ge=0, description="Documents updated")
+    unchanged: int = Field(default=0, ge=0, description="Documents unchanged")
+    deleted: int = Field(default=0, ge=0, description="Documents deleted")
+    total: int = Field(default=0, ge=0, description="Total documents processed")
+    message: str = Field(..., description="Human-readable status message")
+
+
+class SettingsResult(BaseModel):
+    """Result of rlm_settings tool."""
+
+    project_id: str = Field(..., description="Project ID")
+    max_tokens_per_query: int = Field(..., description="Max tokens per query")
+    search_mode: str = Field(..., description="Default search mode")
+    include_summaries: bool = Field(..., description="Include summaries in queries")
+    auto_inject_context: bool = Field(..., description="Auto-inject context")
     message: str = Field(..., description="Human-readable status message")

@@ -245,6 +245,10 @@ class RLMEngine:
             ToolName.RLM_STORE_SUMMARY: self._handle_store_summary,
             ToolName.RLM_GET_SUMMARIES: self._handle_get_summaries,
             ToolName.RLM_DELETE_SUMMARY: self._handle_delete_summary,
+            # Phase 5: Document Upload Tools
+            ToolName.RLM_UPLOAD_DOCUMENT: self._handle_upload_document,
+            ToolName.RLM_SYNC_DOCUMENTS: self._handle_sync_documents,
+            ToolName.RLM_SETTINGS: self._handle_settings,
         }
 
         handler = handlers.get(tool)
@@ -1721,6 +1725,225 @@ class RLMEngine:
         result = DeleteSummaryResult(
             deleted_count=deleted_count,
             message=f"Deleted {deleted_count} summary(ies)",
+        )
+
+        return ToolResult(
+            data=result.model_dump(),
+            input_tokens=0,
+            output_tokens=count_tokens(str(result.model_dump())),
+        )
+
+    # ============ DOCUMENT UPLOAD HANDLERS (Phase 5) ============
+
+    async def _handle_upload_document(self, params: dict[str, Any]) -> ToolResult:
+        """Handle rlm_upload_document - upload or update a document."""
+        from .models import UploadDocumentResult
+
+        path = params.get("path", "")
+        content = params.get("content", "")
+
+        if not path or not content:
+            return ToolResult(
+                data={"error": "Both path and content are required"},
+                input_tokens=0,
+                output_tokens=0,
+            )
+
+        # Validate file extension
+        allowed_extensions = [".md", ".txt", ".mdx", ".markdown"]
+        ext = path.lower()[path.rfind("."):] if "." in path else ""
+        if ext not in allowed_extensions:
+            return ToolResult(
+                data={"error": f"File type not allowed. Supported: {', '.join(allowed_extensions)}"},
+                input_tokens=0,
+                output_tokens=0,
+            )
+
+        db = await get_db()
+
+        # Calculate hash
+        content_hash = hashlib.sha256(content.encode()).hexdigest()
+
+        # Check if document exists
+        existing = await db.document.find_first(
+            where={"projectId": self.project_id, "path": path}
+        )
+
+        if existing:
+            # Update if hash changed
+            if existing.hash == content_hash:
+                result = UploadDocumentResult(
+                    path=path,
+                    action="unchanged",
+                    size=len(content.encode()),
+                    hash=content_hash,
+                    message=f"Document unchanged: {path}",
+                )
+            else:
+                await db.document.update(
+                    where={"id": existing.id},
+                    data={
+                        "content": content,
+                        "size": len(content.encode()),
+                        "hash": content_hash,
+                    },
+                )
+                result = UploadDocumentResult(
+                    path=path,
+                    action="updated",
+                    size=len(content.encode()),
+                    hash=content_hash,
+                    message=f"Document updated: {path}",
+                )
+        else:
+            # Create new document
+            await db.document.create(
+                data={
+                    "projectId": self.project_id,
+                    "path": path,
+                    "content": content,
+                    "size": len(content.encode()),
+                    "hash": content_hash,
+                }
+            )
+            result = UploadDocumentResult(
+                path=path,
+                action="created",
+                size=len(content.encode()),
+                hash=content_hash,
+                message=f"Document created: {path}",
+            )
+
+        # Reload documents to update index
+        await self.load_documents()
+
+        return ToolResult(
+            data=result.model_dump(),
+            input_tokens=count_tokens(content),
+            output_tokens=count_tokens(str(result.model_dump())),
+        )
+
+    async def _handle_sync_documents(self, params: dict[str, Any]) -> ToolResult:
+        """Handle rlm_sync_documents - bulk sync documents."""
+        from .models import SyncDocumentsResult
+
+        documents = params.get("documents", [])
+        delete_missing = params.get("delete_missing", False)
+
+        if not documents:
+            return ToolResult(
+                data={"error": "No documents provided"},
+                input_tokens=0,
+                output_tokens=0,
+            )
+
+        db = await get_db()
+
+        created = 0
+        updated = 0
+        unchanged = 0
+        deleted = 0
+        input_tokens = 0
+
+        # Track paths we're syncing
+        synced_paths = set()
+
+        for doc in documents:
+            path = doc.get("path", "")
+            content = doc.get("content", "")
+
+            if not path or not content:
+                continue
+
+            synced_paths.add(path)
+            input_tokens += count_tokens(content)
+
+            # Calculate hash
+            content_hash = hashlib.sha256(content.encode()).hexdigest()
+
+            # Check if document exists
+            existing = await db.document.find_first(
+                where={"projectId": self.project_id, "path": path}
+            )
+
+            if existing:
+                if existing.hash == content_hash:
+                    unchanged += 1
+                else:
+                    await db.document.update(
+                        where={"id": existing.id},
+                        data={
+                            "content": content,
+                            "size": len(content.encode()),
+                            "hash": content_hash,
+                        },
+                    )
+                    updated += 1
+            else:
+                await db.document.create(
+                    data={
+                        "projectId": self.project_id,
+                        "path": path,
+                        "content": content,
+                        "size": len(content.encode()),
+                        "hash": content_hash,
+                    }
+                )
+                created += 1
+
+        # Delete documents not in sync list if requested
+        if delete_missing:
+            all_docs = await db.document.find_many(
+                where={"projectId": self.project_id}
+            )
+            for doc in all_docs:
+                if doc.path not in synced_paths:
+                    await db.document.delete(where={"id": doc.id})
+                    deleted += 1
+
+        # Reload documents to update index
+        await self.load_documents()
+
+        result = SyncDocumentsResult(
+            created=created,
+            updated=updated,
+            unchanged=unchanged,
+            deleted=deleted,
+            total=created + updated + unchanged,
+            message=f"Sync complete: {created} created, {updated} updated, {unchanged} unchanged, {deleted} deleted",
+        )
+
+        return ToolResult(
+            data=result.model_dump(),
+            input_tokens=input_tokens,
+            output_tokens=count_tokens(str(result.model_dump())),
+        )
+
+    async def _handle_settings(self, params: dict[str, Any]) -> ToolResult:
+        """Handle rlm_settings - get project settings from dashboard."""
+        from .models import SettingsResult
+
+        db = await get_db()
+
+        # Get project settings
+        project = await db.project.find_unique(
+            where={"id": self.project_id}
+        )
+
+        if not project:
+            return ToolResult(
+                data={"error": "Project not found"},
+                input_tokens=0,
+                output_tokens=0,
+            )
+
+        result = SettingsResult(
+            project_id=self.project_id,
+            max_tokens_per_query=project.maxTokensPerQuery or 4000,
+            search_mode=project.searchMode or "hybrid",
+            include_summaries=project.includeSummaries if project.includeSummaries is not None else True,
+            auto_inject_context=project.autoInjectContext if project.autoInjectContext is not None else False,
+            message="Settings loaded from dashboard",
         )
 
         return ToolResult(

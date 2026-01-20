@@ -581,6 +581,74 @@ async def mcp_sse_endpoint_post(
     )
 
 
+# ============ WEBHOOK ENDPOINTS ============
+
+
+@app.post("/v1/{project_id}/webhook/sync", tags=["Webhook"])
+async def webhook_sync_documents(
+    project_id: str,
+    request: Request,
+    api_key: Annotated[str, Depends(get_api_key)],
+):
+    """
+    Webhook endpoint for syncing documents from git commits.
+
+    Can be triggered by GitHub Actions, GitLab CI, or any CI/CD pipeline.
+
+    Body format:
+    {
+        "documents": [
+            {"path": "docs/readme.md", "content": "..."},
+            {"path": "CLAUDE.md", "content": "..."}
+        ],
+        "delete_missing": false  // optional: delete docs not in list
+    }
+    """
+    start_time = time.perf_counter()
+
+    # Validate API key and project
+    _, _, plan = await validate_and_rate_limit(project_id, api_key)
+
+    try:
+        body = await request.json()
+        documents = body.get("documents", [])
+        delete_missing = body.get("delete_missing", False)
+
+        if not documents:
+            raise HTTPException(status_code=400, detail="No documents provided")
+
+        # Use the sync_documents tool
+        engine = RLMEngine(project_id, plan=plan)
+        result = await engine.execute(
+            ToolName.RLM_SYNC_DOCUMENTS,
+            {"documents": documents, "delete_missing": delete_missing},
+        )
+
+        latency_ms = int((time.perf_counter() - start_time) * 1000)
+
+        # Track usage
+        await track_usage(
+            project_id=project_id,
+            tool="webhook_sync",
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            latency_ms=latency_ms,
+            success=True,
+        )
+
+        return JSONResponse(
+            content={
+                "success": True,
+                "result": result.data,
+                "latency_ms": latency_ms,
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Webhook sync error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ============ MAIN ============
 
 
