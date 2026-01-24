@@ -190,8 +190,12 @@ mypy src/
 Deployed on Railway with auto-deploy from main branch.
 
 ```bash
-# Dockerfile builds and deploys automatically
+# Auto-deploy (default)
 git push origin main
+
+# Manual deploy (if auto-deploy fails)
+railway link    # Link to project (first time only)
+railway up      # Deploy current code
 ```
 
 ## Environment Variables

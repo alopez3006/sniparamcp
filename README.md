@@ -92,6 +92,15 @@ cp .env.example .env
 uvicorn src.server:app --host 0.0.0.0 --port 8000
 ```
 
+### Deploy to Railway
+
+Railway auto-deploys from main branch. If auto-deploy fails, deploy manually:
+
+```bash
+railway link    # Link to existing project (first time only)
+railway up      # Deploy current code
+```
+
 ## Integration
 
 ### Claude Code
