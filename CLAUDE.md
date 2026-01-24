@@ -1,6 +1,8 @@
-# CLAUDE.md - Snipara MCP Server
+# CLAUDE.md - Snipara FastAPI Server
 
-This document helps Claude Code understand the snipara-mcp-server project.
+This document helps Claude Code understand the snipara-fastapi project.
+
+**PyPI Package:** [`snipara-fastapi`](https://pypi.org/project/snipara-fastapi/)
 
 ## Project Overview
 
@@ -39,7 +41,7 @@ Snipara MCP Server is a **Context Optimization as a Service** backend. It indexe
 ## Key Directories
 
 ```
-snipara-mcp-server/
+snipara-fastapi/
 ├── src/
 │   ├── server.py           # FastAPI app entry point
 │   ├── rlm_engine.py       # Context optimization engine
@@ -160,12 +162,19 @@ pip install rlm-runtime
 **Repository:** https://github.com/alopez3006/rlm-runtime
 **PyPI:** https://pypi.org/project/rlm-runtime/
 
+## Installation
+
+```bash
+# From PyPI
+pip install snipara-fastapi
+
+# From source
+pip install -r requirements.txt
+```
+
 ## Development
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
 # Run locally
 uvicorn src.server:app --reload --port 8000
 
@@ -215,3 +224,45 @@ git push origin main
 ---
 
 *Last updated: January 2025*
+
+---
+
+## BMad Method (Global Commands)
+
+BMad Method is available globally across all Claude Code sessions. Use these slash commands for structured workflows.
+
+### Quick Start
+```
+/bmad/core/agents/bmad-master    # Main BMad agent - start here
+/bmad-help                        # Get guidance on what to do next
+```
+
+### Core Workflows
+| Command | Purpose |
+|---------|---------|
+| `/bmad/bmm/workflows/prd` | Create Product Requirements Document |
+| `/bmad/bmm/workflows/create-architecture` | Design system architecture |
+| `/bmad/bmm/workflows/create-story` | Create user stories |
+| `/bmad/bmm/workflows/create-epics-and-stories` | Full epic breakdown |
+| `/bmad/bmm/workflows/dev-story` | Develop/implement a story |
+| `/bmad/bmm/workflows/quick-dev` | Quick development flow |
+| `/bmad/bmm/workflows/sprint-planning` | Sprint planning session |
+
+### Planning & Design
+| Command | Purpose |
+|---------|---------|
+| `/bmad/bmm/workflows/create-product-brief` | Initial product brief |
+| `/bmad/bmm/workflows/check-implementation-readiness` | Verify before coding |
+| `/bmad/core/workflows/brainstorming` | Brainstorming session |
+
+### Documentation & Diagrams
+| Command | Purpose |
+|---------|---------|
+| `/bmad/bmm/workflows/document-project` | Generate project docs |
+| `/bmad/bmm/workflows/create-excalidraw-diagram` | Create diagrams |
+| `/bmad/bmm/workflows/create-excalidraw-flowchart` | Create flowcharts |
+| `/bmad/bmm/workflows/create-excalidraw-wireframe` | Create wireframes |
+| `/bmad/bmm/workflows/create-excalidraw-dataflow` | Create data flow diagrams |
+
+### Installation
+BMad is installed globally at `~/bmad-global/` and symlinked to `~/.claude/commands/bmad/`.

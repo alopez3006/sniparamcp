@@ -1,5 +1,8 @@
 # Snipara MCP Server
 
+[![PyPI version](https://badge.fury.io/py/snipara-fastapi.svg)](https://pypi.org/project/snipara-fastapi/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+
 Context Optimization Server for LLMs via the Model Context Protocol (MCP).
 
 Turn **500K tokens** of documentation into **5K tokens** of perfectly relevant context.
@@ -59,10 +62,18 @@ https://api.snipara.com/v1/YOUR_PROJECT_ID/mcp
 
 ### Self-Hosting
 
+#### Install from PyPI
+
+```bash
+pip install snipara-fastapi
+```
+
+#### Or install from source
+
 1. Clone this repository:
 ```bash
-git clone https://github.com/alopez3006/snipara-mcp-server.git
-cd snipara-mcp-server
+git clone https://github.com/alopez3006/snipara-fastapi.git
+cd snipara-fastapi
 ```
 
 2. Install dependencies:
@@ -256,5 +267,6 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 - **Website:** [snipara.com](https://snipara.com)
 - **Documentation:** [snipara.com/docs](https://snipara.com/docs)
-- **Issues:** [GitHub Issues](https://github.com/alopez3006/snipara-mcp-server/issues)
+- **PyPI:** [pypi.org/project/snipara-fastapi](https://pypi.org/project/snipara-fastapi/)
+- **Issues:** [GitHub Issues](https://github.com/alopez3006/snipara-fastapi/issues)
 
