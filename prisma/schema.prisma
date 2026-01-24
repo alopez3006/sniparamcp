@@ -31,6 +31,8 @@ model User {
   sessions    Session[]
   teamMembers TeamMember[]
   apiKeys     ApiKey[]
+  teamApiKeys TeamApiKey[]
+  oauthTokens OAuthToken[]
 
   @@map("users")
 }
@@ -91,6 +93,7 @@ model Team {
   invites      TeamInvite[]
   projects     Project[]
   subscription Subscription?
+  teamApiKeys  TeamApiKey[]
 
   @@map("teams")
 }
@@ -140,9 +143,21 @@ model Project {
   name        String
   slug        String
   description String?
+  icon        String?  @db.Text
   githubRepo  String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+
+  // Automation settings (synced from dashboard)
+  automationClient      String  @default("claude-code")
+  autoInjectContext     Boolean @default(false)
+  trackAccessedFiles    Boolean @default(false)
+  preserveOnCompaction  Boolean @default(true)
+  restoreOnSessionStart Boolean @default(true)
+  enrichPrompts         Boolean @default(false)
+  maxTokensPerQuery     Int     @default(4000)
+  searchMode            String  @default("hybrid")
+  includeSummaries      Boolean @default(true)
 
   teamId         String
   team           Team             @relation(fields: [teamId], references: [id], onDelete: Cascade)
@@ -150,6 +165,7 @@ model Project {
   sessionContext SessionContext[]
   apiKeys        ApiKey[]
   queries        Query[]
+  oauthTokens    OAuthToken[]
 
   @@unique([teamId, slug])
   @@map("projects")
@@ -167,6 +183,7 @@ model Document {
   projectId String
   project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
   chunks    DocumentChunk[]
+  summaries DocumentSummary[]
 
   @@unique([projectId, path])
   @@index([projectId])
@@ -190,6 +207,47 @@ model DocumentChunk {
 
   @@index([documentId])
   @@map("document_chunks")
+}
+
+// ============================================
+// Document Summary Models (LLM-generated summaries)
+// ============================================
+
+model DocumentSummary {
+  id          String   @id @default(cuid())
+
+  // The summary content
+  summary     String   @db.Text
+  summaryType String   @default("concise") // concise, detailed, technical, keywords, custom
+
+  // Optional: which part of the document this summarizes
+  sectionId   String?  // Section identifier (e.g., "## Authentication")
+  lineStart   Int?     // Starting line (for partial document summaries)
+  lineEnd     Int?     // Ending line
+
+  // Token info
+  tokenCount  Int
+
+  // Attribution - who/what generated this summary
+  generatedBy String?  // e.g., "claude-3.5-sonnet", "gpt-4", "user"
+
+  // Timestamps
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  documentId  String
+  document    Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  // Denormalized for easier queries
+  projectId   String
+
+  // One summary per type per document (or per section if sectionId is set)
+  @@unique([documentId, summaryType, sectionId])
+  @@index([projectId])
+  @@index([documentId])
+  @@index([summaryType])
+  @@map("document_summaries")
 }
 
 model SessionContext {
@@ -230,6 +288,103 @@ model ApiKey {
   @@index([projectId])
   @@index([keyHash])
   @@map("api_keys")
+}
+
+model TeamApiKey {
+  id         String    @id @default(cuid())
+  name       String
+  keyHash    String    @unique
+  keyPrefix  String
+  lastUsedAt DateTime?
+  expiresAt  DateTime?
+  createdAt  DateTime  @default(now())
+  revokedAt  DateTime?
+
+  userId String
+  teamId String
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  team   Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@index([teamId])
+  @@index([keyHash])
+  @@map("team_api_keys")
+}
+
+// ============================================
+// OAuth Device Flow Models
+// ============================================
+
+enum DeviceCodeStatus {
+  PENDING    // Waiting for user authorization
+  AUTHORIZED // User has authorized, ready for token exchange
+  EXPIRED    // Code has expired
+  USED       // Token already issued
+  DENIED     // User denied authorization
+}
+
+model DeviceCode {
+  id         String           @id @default(cuid())
+  deviceCode String           @unique // Long random code for client polling
+  userCode   String           @unique // Short human-readable code (e.g., "ABCD-1234")
+
+  // Scope and context
+  projectId String? // Project being authorized (set when user approves)
+  scope     String  @default("mcp:read mcp:write")
+  clientId  String? // Optional client identifier (e.g., "claude-desktop")
+
+  // Status
+  status         DeviceCodeStatus @default(PENDING)
+  authorizedAt   DateTime?
+  authorizedById String? // User who authorized
+
+  // Expiration and polling
+  expiresAt DateTime
+  interval  Int      @default(5) // Polling interval in seconds
+
+  createdAt DateTime @default(now())
+
+  @@index([deviceCode])
+  @@index([userCode])
+  @@index([expiresAt])
+  @@map("device_codes")
+}
+
+model OAuthToken {
+  id String @id @default(cuid())
+
+  // Token data (hashed for security)
+  accessTokenHash  String  @unique
+  refreshTokenHash String? @unique
+
+  // Token prefix for identification (first 12 chars)
+  tokenPrefix String
+
+  // Ownership
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  // Scope and metadata
+  scope      String
+  clientId   String? // Client that requested the token
+  clientName String? // Human-readable client name (e.g., "Claude Desktop")
+
+  // Expiration
+  accessExpiresAt  DateTime
+  refreshExpiresAt DateTime?
+
+  // Status
+  revokedAt  DateTime?
+  lastUsedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([projectId])
+  @@index([accessTokenHash])
+  @@index([refreshTokenHash])
+  @@map("oauth_tokens")
 }
 
 // ============================================
