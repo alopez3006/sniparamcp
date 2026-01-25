@@ -9,8 +9,6 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from prisma import Json
-
 from ..db import get_db
 from .cache import get_redis
 
@@ -83,13 +81,13 @@ async def broadcast_event(
 
     # 1. Persist to database
     create_data: dict[str, Any] = {
-        "swarm": {"connect": {"id": swarm_id}},
+        "swarmId": swarm_id,
         "eventType": event_type,
-        "payload": Json(parsed_payload),  # Wrap with Json() for Prisma
+        "payload": parsed_payload,
     }
     # Only connect agent if found
     if swarm_agent:
-        create_data["agent"] = {"connect": {"id": swarm_agent.id}}
+        create_data["agentId"] = swarm_agent.id
 
     event = await db.swarmevent.create(data=create_data)
 
