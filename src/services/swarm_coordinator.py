@@ -8,6 +8,12 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+try:
+    from prisma import Json
+except ImportError:
+    # Fallback for when Json isn't available (use identity function)
+    Json = lambda x: x
+
 from ..db import get_db
 from .agent_limits import check_swarm_agent_limits, check_swarm_limits
 
@@ -583,13 +589,16 @@ async def set_state(
     """
     db = await get_db()
 
-    # Parse value if it's a string (from MCP)
-    parsed_value = value
+    # Ensure value is JSON-serializable - Prisma expects dict/list for Json fields
     if isinstance(value, str):
         try:
             parsed_value = json.loads(value)
         except json.JSONDecodeError:
             parsed_value = {"raw": value}
+    elif isinstance(value, (dict, list)):
+        parsed_value = value
+    else:
+        parsed_value = {"value": value}
 
     # Check existing state
     existing = await db.sharedstate.find_first(
@@ -614,7 +623,7 @@ async def set_state(
         await db.sharedstate.update(
             where={"id": existing.id},
             data={
-                "value": parsed_value,
+                "value": Json(parsed_value),
                 "version": new_version,
                 "updatedBy": agent_id,
             },
@@ -632,7 +641,7 @@ async def set_state(
             data={
                 "swarmId": swarm_id,
                 "key": key,
-                "value": parsed_value,
+                "value": Json(parsed_value),
                 "version": 1,
                 "updatedBy": agent_id,
             }
@@ -868,7 +877,7 @@ async def complete_task(
         where={"id": task.id},
         data={
             "status": status,
-            "result": parsed_result,
+            "result": Json(parsed_result) if parsed_result is not None else None,
             "completedAt": datetime.now(timezone.utc),
         },
     )

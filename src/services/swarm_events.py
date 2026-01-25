@@ -9,6 +9,12 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+try:
+    from prisma import Json
+except ImportError:
+    # Fallback for when Json isn't available (use identity function)
+    Json = lambda x: x
+
 from ..db import get_db
 from .cache import get_redis
 
@@ -83,7 +89,7 @@ async def broadcast_event(
     create_data: dict[str, Any] = {
         "swarmId": swarm_id,
         "eventType": event_type,
-        "payload": parsed_payload,
+        "payload": Json(parsed_payload),
     }
     # Only connect agent if found
     if swarm_agent:
