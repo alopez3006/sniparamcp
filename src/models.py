@@ -197,7 +197,7 @@ class HealthResponse(BaseModel):
     """Health check response."""
 
     status: str = Field(default="healthy")
-    version: str = Field(default="1.1.0")
+    version: str = Field(default="1.0.0")
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 
