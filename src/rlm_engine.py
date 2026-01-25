@@ -422,6 +422,7 @@ class RLMEngine:
             ToolName.RLM_DECOMPOSE: self._handle_decompose,
             ToolName.RLM_MULTI_QUERY: self._handle_multi_query,
             ToolName.RLM_PLAN: self._handle_plan,
+            ToolName.RLM_MULTI_PROJECT_QUERY: self._handle_multi_project_query,
             # Phase 4.6: Summary Storage Tools
             ToolName.RLM_STORE_SUMMARY: self._handle_store_summary,
             ToolName.RLM_GET_SUMMARIES: self._handle_get_summaries,
@@ -1583,6 +1584,34 @@ class RLMEngine:
             data=result.model_dump(),
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+        )
+
+    async def _handle_multi_project_query(self, params: dict[str, Any]) -> ToolResult:
+        """
+        Handle rlm_multi_project_query - query across multiple team projects.
+
+        This tool requires team-level access and must be called via the team endpoint:
+        POST /v1/team/{team_slug}/mcp
+
+        Returns an error when called via the project-scoped MCP endpoint.
+        """
+        query = params.get("query", "")
+        return ToolResult(
+            data={
+                "error": "rlm_multi_project_query requires a team API key",
+                "message": "This tool queries across all projects in a team. Use the team endpoint: POST /v1/team/{team_slug}/mcp",
+                "example": {
+                    "endpoint": "https://api.snipara.com/v1/team/{team_slug}/mcp",
+                    "method": "POST",
+                    "headers": {"X-API-Key": "your-team-api-key"},
+                    "body": {
+                        "tool": "rlm_multi_project_query",
+                        "params": {"query": query or "your question here"},
+                    },
+                },
+            },
+            input_tokens=count_tokens(query),
+            output_tokens=0,
         )
 
     # ============ HELPER METHODS FOR RECURSIVE CONTEXT ============

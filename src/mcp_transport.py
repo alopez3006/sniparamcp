@@ -88,6 +88,50 @@ TOOL_DEFINITIONS = [
         },
     },
     {
+        "name": "rlm_plan",
+        "description": "Generate full execution plan for complex questions. Returns steps for decomposition, context queries, and synthesis.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The complex question to plan for"},
+                "strategy": {
+                    "type": "string",
+                    "enum": ["breadth_first", "depth_first", "relevance_first"],
+                    "default": "relevance_first",
+                    "description": "Execution strategy",
+                },
+                "max_tokens": {"type": "integer", "default": 16000, "minimum": 1000, "maximum": 100000},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "rlm_multi_project_query",
+        "description": "Query across all projects in a team. Requires team API key.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Question or topic"},
+                "max_tokens": {"type": "integer", "default": 4000, "minimum": 100, "maximum": 100000},
+                "per_project_limit": {"type": "integer", "default": 3, "minimum": 1, "maximum": 20},
+                "project_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional project IDs/slugs to include",
+                },
+                "exclude_project_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional project IDs/slugs to exclude",
+                },
+                "search_mode": {"type": "string", "enum": ["keyword", "semantic", "hybrid"], "default": "keyword"},
+                "include_metadata": {"type": "boolean", "default": True},
+                "prefer_summaries": {"type": "boolean", "default": False},
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "rlm_inject",
         "description": "Set session context for subsequent queries.",
         "inputSchema": {
