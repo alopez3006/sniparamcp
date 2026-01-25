@@ -6,7 +6,7 @@ Events are also persisted to the database for agents that poll.
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from ..db import get_db
@@ -51,24 +51,35 @@ async def broadcast_event(
     db = await get_db()
     redis = await get_redis()
 
+    # Look up SwarmAgent by external agent_id
+    swarm_agent = await db.swarmagent.find_first(
+        where={
+            "swarmId": swarm_id,
+            "agentId": agent_id,
+            "isActive": True,
+        }
+    )
+
     # Build event data
     event_data = {
         "type": event_type,
         "agent_id": agent_id,
         "swarm_id": swarm_id,
         "payload": payload or {},
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
     # 1. Persist to database
-    event = await db.swarmevent.create(
-        data={
-            "swarmId": swarm_id,
-            "agentId": agent_id,
-            "eventType": event_type,
-            "payload": json.dumps(payload) if payload else None,
-        }
-    )
+    create_data: dict[str, Any] = {
+        "swarm": {"connect": {"id": swarm_id}},
+        "eventType": event_type,
+        "payload": payload or {},
+    }
+    # Only connect agent if found
+    if swarm_agent:
+        create_data["agent"] = {"connect": {"id": swarm_agent.id}}
+
+    event = await db.swarmevent.create(data=create_data)
 
     # 2. Publish to Redis (if available)
     redis_published = False
