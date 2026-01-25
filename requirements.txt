@@ -16,6 +16,9 @@ python-dotenv>=1.0.0
 # Security
 bcrypt>=4.1.0
 
+# Error tracking
+sentry-sdk[fastapi]>=1.40.0
+
 # Token counting
 tiktoken>=0.5.0
 
