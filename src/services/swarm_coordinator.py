@@ -873,13 +873,17 @@ async def complete_task(
         except json.JSONDecodeError:
             parsed_result = {"raw": result}
 
+    # Build update data - only include result if not None
+    update_data: dict[str, Any] = {
+        "status": status,
+        "completedAt": datetime.now(timezone.utc),
+    }
+    if parsed_result is not None:
+        update_data["result"] = Json(parsed_result)
+
     await db.swarmtask.update(
         where={"id": task.id},
-        data={
-            "status": status,
-            "result": Json(parsed_result) if parsed_result is not None else None,
-            "completedAt": datetime.now(timezone.utc),
-        },
+        data=update_data,
     )
 
     logger.info(f"Task {task_id} completed with status {status}")
