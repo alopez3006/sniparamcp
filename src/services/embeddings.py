@@ -23,8 +23,9 @@ MODEL_NAME = "all-MiniLM-L6-v2"
 EMBEDDING_DIMENSION = 384
 
 # Timeout configuration (in seconds)
-EMBEDDING_TIMEOUT_SINGLE = 5.0  # Timeout for single text embedding
-EMBEDDING_TIMEOUT_BATCH = 30.0  # Timeout for batch embedding (larger texts)
+# Note: First request may take longer due to model cold-start (loading into memory)
+EMBEDDING_TIMEOUT_SINGLE = 30.0  # Timeout for single text embedding (includes cold-start)
+EMBEDDING_TIMEOUT_BATCH = 60.0  # Timeout for batch embedding (larger texts)
 
 # Thread pool for embedding operations
 _embedding_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="embedding")
