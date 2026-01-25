@@ -44,6 +44,11 @@ def calculate_confidence_decay(
 
     # Use last access time if available, otherwise creation time
     reference_time = last_accessed_at or created_at
+
+    # Ensure reference_time is timezone-aware (database may return naive datetimes)
+    if reference_time.tzinfo is None:
+        reference_time = reference_time.replace(tzinfo=timezone.utc)
+
     days_since_reference = (now - reference_time).days
 
     # Apply exponential decay
