@@ -1,6 +1,6 @@
 [project]
 name = "rlm-mcp-server"
-version = "1.7.7"
+version = "1.7.8"
 description = "Hosted MCP server for RLM SaaS - Context-efficient documentation queries"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -38,11 +38,14 @@ benchmark = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling<1.26"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
+
+[tool.hatch.metadata]
+license-files = []
 
 [tool.ruff]
 line-length = 100
