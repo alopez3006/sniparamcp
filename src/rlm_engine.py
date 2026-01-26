@@ -361,10 +361,15 @@ class RLMEngine:
 
         current_section: Section | None = None
         section_content: list[str] = []
+        in_code_block = False
 
         for i, line in enumerate(lines):
-            # Check for markdown headers
-            header_match = re.match(r"^(#{1,6})\s+(.+)$", line)
+            # Track fenced code blocks to avoid parsing comments as headers
+            if line.startswith("```") or line.startswith("~~~"):
+                in_code_block = not in_code_block
+
+            # Check for markdown headers (only outside code blocks)
+            header_match = re.match(r"^(#{1,6})\s+(.+)$", line) if not in_code_block else None
 
             if header_match:
                 # Save previous section
