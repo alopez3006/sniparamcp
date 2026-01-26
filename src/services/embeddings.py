@@ -63,8 +63,9 @@ class EmbeddingsService:
             # Import here to avoid loading torch at startup
             from sentence_transformers import SentenceTransformer
 
-            self._model = SentenceTransformer(MODEL_NAME)
-            logger.info(f"Embedding model loaded: {MODEL_NAME}")
+            # Explicitly load on CPU to avoid meta tensor issues on memory-constrained environments
+            self._model = SentenceTransformer(MODEL_NAME, device="cpu")
+            logger.info(f"Embedding model loaded: {MODEL_NAME} (device: cpu)")
         return self._model
 
     def embed_text(self, text: str) -> list[float]:
