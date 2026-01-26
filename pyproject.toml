@@ -1,7 +1,7 @@
 [project]
-name = "rlm-mcp-server"
+name = "snipara-fastapi"
 version = "1.7.8"
-description = "Hosted MCP server for RLM SaaS - Context-efficient documentation queries"
+description = "Hosted MCP server for Snipara - Context optimization and Agent infrastructure for LLMs"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
