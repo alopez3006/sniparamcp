@@ -69,6 +69,7 @@ from .services.agent_memory import (
 from .services.agent_limits import (
     check_memory_limits,
     check_swarm_limits,
+    validate_agents_access,
 )
 from .services.swarm_coordinator import (
     create_swarm,
@@ -157,6 +158,27 @@ ADMIN_TOOLS = {
 # NONE_ALLOWED: Tools that can be used even with NONE access level
 NONE_ALLOWED_TOOLS = {
     ToolName.RLM_REQUEST_ACCESS,
+}
+
+# AGENT_TOOLS: Tools that require Agents subscription and Context plan validation
+# These tools require Agents TEAM/ENTERPRISE users to have Context TEAM/ENTERPRISE
+AGENT_TOOLS = {
+    # Memory tools
+    ToolName.RLM_REMEMBER,
+    ToolName.RLM_RECALL,
+    ToolName.RLM_MEMORIES,
+    ToolName.RLM_FORGET,
+    # Swarm tools
+    ToolName.RLM_SWARM_CREATE,
+    ToolName.RLM_SWARM_JOIN,
+    ToolName.RLM_CLAIM,
+    ToolName.RLM_RELEASE,
+    ToolName.RLM_STATE_GET,
+    ToolName.RLM_STATE_SET,
+    ToolName.RLM_BROADCAST,
+    ToolName.RLM_TASK_CREATE,
+    ToolName.RLM_TASK_CLAIM,
+    ToolName.RLM_TASK_COMPLETE,
 }
 
 # Default system instructions injected into every query response
@@ -582,6 +604,12 @@ class RLMEngine:
         if access_error:
             return access_error
 
+        # Check Agents Context plan requirement for agent tools
+        if tool in AGENT_TOOLS:
+            agents_access_result = await self._check_agents_access(tool)
+            if agents_access_result:
+                return agents_access_result
+
         return await handler(params)
 
     def _check_tool_access(self, tool: ToolName) -> ToolResult | None:
@@ -642,6 +670,50 @@ class RLMEngine:
 
         # Unknown access level - default to EDITOR for backward compatibility
         return None
+
+    async def _check_agents_access(self, tool: ToolName) -> ToolResult | None:
+        """
+        Check if user has proper Agents subscription and Context plan requirement.
+
+        For Agents TEAM/ENTERPRISE plans, the team must also have Context TEAM/ENTERPRISE.
+        Personal Agents plans (STARTER/PRO) don't require a Context plan.
+
+        Returns:
+            ToolResult with error if access denied, None if access allowed
+        """
+        try:
+            allowed, error, warning = await validate_agents_access(self.project_id)
+
+            if not allowed:
+                return ToolResult(
+                    data={
+                        "error": error or "Agents access denied",
+                        "upgrade_required": True,
+                        "tool": tool.value,
+                        "help": (
+                            "Agents TEAM/ENTERPRISE plans require a matching Context plan. "
+                            "Personal plans (STARTER/PRO) can be used without a Context subscription. "
+                            "Visit your dashboard to upgrade your plan."
+                        ),
+                    },
+                    input_tokens=0,
+                    output_tokens=0,
+                )
+
+            # If there's a warning (grace period), log it but allow access
+            if warning:
+                logging.getLogger(__name__).warning(
+                    f"Agents access warning for project {self.project_id}: {warning}"
+                )
+
+            return None
+
+        except Exception as e:
+            logging.getLogger(__name__).error(
+                f"Error checking agents access for project {self.project_id}: {e}"
+            )
+            # Fail open - if we can't check, allow access
+            return None
 
     async def _handle_ask(self, params: dict[str, Any]) -> ToolResult:
         """Handle rlm_ask - query documentation with natural language."""

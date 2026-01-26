@@ -4,11 +4,28 @@ Enforces plan limits for memories, swarms, and agents.
 """
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from ..db import get_db
 
 logger = logging.getLogger(__name__)
+
+# Context plan hierarchy for validation
+CONTEXT_PLAN_HIERARCHY = {
+    "FREE": 0,
+    "PRO": 1,
+    "TEAM": 2,
+    "ENTERPRISE": 3,
+}
+
+# Required Context plan for Agents plans
+REQUIRED_CONTEXT_PLAN = {
+    "STARTER": None,  # No requirement
+    "PRO": None,  # No requirement
+    "TEAM": "TEAM",  # Requires Context TEAM or higher
+    "ENTERPRISE": "ENTERPRISE",  # Requires Context ENTERPRISE only
+}
 
 # Plan limits by tier
 PLAN_LIMITS = {
@@ -116,10 +133,13 @@ def _subscription_to_dict(sub: Any) -> dict[str, Any]:
         "id": sub.id,
         "plan": sub.plan,
         "status": sub.status,
+        "team_id": sub.teamId,
         "memory_limit": sub.memoryLimit,
         "swarm_limit": sub.swarmLimit,
         "agents_per_swarm_limit": sub.agentsPerSwarmLimit,
         "cache_ttl_seconds": sub.cacheTtlSeconds,
+        "grace_period_end": sub.gracePeriodEnd,
+        "grace_period_reason": sub.gracePeriodReason,
     }
 
 
@@ -347,3 +367,142 @@ async def get_usage_stats(project_id: str) -> dict[str, Any]:
             "unlimited": swarm_limit == -1,
         },
     }
+
+
+async def validate_agents_context_plan(
+    project_id: str,
+    agents_subscription: dict[str, Any] | None = None,
+) -> tuple[bool, str | None]:
+    """Validate that team has required Context plan for Agents TEAM/ENTERPRISE.
+
+    Args:
+        project_id: The project ID
+        agents_subscription: Optional pre-fetched agents subscription
+
+    Returns:
+        Tuple of (allowed, error_message)
+    """
+    db = await get_db()
+
+    # Get agents subscription if not provided
+    if agents_subscription is None:
+        agents_subscription = await get_agents_subscription(project_id)
+
+    if not agents_subscription:
+        return True, None  # No agents subscription = no validation needed
+
+    agents_plan = agents_subscription["plan"]
+    required_context = REQUIRED_CONTEXT_PLAN.get(agents_plan)
+
+    if not required_context:
+        return True, None  # STARTER/PRO = no Context requirement
+
+    team_id = agents_subscription.get("team_id")
+    if not team_id:
+        # Agents TEAM/ENTERPRISE requires a team context
+        return False, f"Agents {agents_plan} requires a team subscription context."
+
+    # Get team's Context subscription
+    context_sub = await db.subscription.find_first(
+        where={"teamId": team_id}
+    )
+
+    if not context_sub:
+        return False, f"Agents {agents_plan} requires Context {required_context} plan. No Context subscription found."
+
+    context_plan = context_sub.plan
+
+    # Check if Context plan is sufficient
+    required_level = CONTEXT_PLAN_HIERARCHY.get(required_context, 0)
+    current_level = CONTEXT_PLAN_HIERARCHY.get(context_plan, 0)
+
+    if current_level < required_level:
+        return False, (
+            f"Agents {agents_plan} requires Context {required_context} plan or higher. "
+            f"Current Context plan: {context_plan}. Please upgrade your Context plan."
+        )
+
+    return True, None
+
+
+async def check_grace_period(
+    agents_subscription: dict[str, Any] | None,
+) -> tuple[bool, str | None]:
+    """Check if agents subscription is within grace period.
+
+    If grace period is set and expired, access is denied.
+    If grace period is set but not expired, access is allowed with a warning.
+
+    Args:
+        agents_subscription: The agents subscription dict
+
+    Returns:
+        Tuple of (allowed, warning_message)
+        - (True, None): No grace period or not in grace period
+        - (True, "Warning: X days left..."): In grace period but not expired
+        - (False, "Grace period expired..."): Grace period has expired
+    """
+    if not agents_subscription:
+        return True, None
+
+    grace_period_end = agents_subscription.get("grace_period_end")
+    if not grace_period_end:
+        return True, None
+
+    # Ensure grace_period_end is timezone-aware
+    if isinstance(grace_period_end, datetime):
+        if grace_period_end.tzinfo is None:
+            grace_period_end = grace_period_end.replace(tzinfo=timezone.utc)
+
+    now = datetime.now(timezone.utc)
+
+    if now > grace_period_end:
+        agents_plan = agents_subscription.get("plan", "UNKNOWN")
+        reason = agents_subscription.get("grace_period_reason", "Context plan downgraded")
+        return False, (
+            f"Grace period expired for Agents {agents_plan}. "
+            f"Reason: {reason}. "
+            f"Please upgrade your Context plan to continue using Agents features."
+        )
+
+    # Grace period not yet expired - allow with warning
+    days_left = (grace_period_end - now).days
+    agents_plan = agents_subscription.get("plan", "UNKNOWN")
+    return True, (
+        f"Warning: {days_left} day(s) left before Agents {agents_plan} access is restricted. "
+        f"Please upgrade your Context plan to avoid interruption."
+    )
+
+
+async def validate_agents_access(
+    project_id: str,
+) -> tuple[bool, str | None, str | None]:
+    """Full validation for agents access including Context plan and grace period.
+
+    Args:
+        project_id: The project ID
+
+    Returns:
+        Tuple of (allowed, error_message, warning_message)
+        - error_message is set if access is denied
+        - warning_message is set if in grace period (access allowed but expiring)
+    """
+    agents_subscription = await get_agents_subscription(project_id)
+
+    if not agents_subscription:
+        return True, None, None  # No agents subscription = use defaults
+
+    # Check grace period first
+    grace_allowed, grace_message = await check_grace_period(agents_subscription)
+    if not grace_allowed:
+        return False, grace_message, None
+
+    # Check Context plan requirement
+    context_allowed, context_error = await validate_agents_context_plan(
+        project_id, agents_subscription
+    )
+    if not context_allowed:
+        return False, context_error, None
+
+    # Access allowed, return any grace period warning
+    return True, None, grace_message
