@@ -223,6 +223,55 @@ async def load_project_shared_context(project_id: str) -> SharedContext:
     )
 
 
+def _truncate_document(doc: SharedDocument, max_tokens: int) -> SharedDocument:
+    """
+    Create a truncated copy of a document to fit within a token budget.
+
+    Truncates content at the nearest line boundary and adds a truncation notice.
+
+    Args:
+        doc: The document to truncate
+        max_tokens: Maximum tokens for the truncated document
+
+    Returns:
+        A new SharedDocument with truncated content
+    """
+    # Reserve tokens for truncation notice
+    notice_tokens = 20
+    available_tokens = max_tokens - notice_tokens
+    if available_tokens <= 0:
+        return doc  # Can't truncate meaningfully
+
+    # Estimate character limit (4 chars per token)
+    char_limit = available_tokens * 4
+
+    if len(doc.content) <= char_limit:
+        return doc  # No truncation needed
+
+    # Truncate at nearest line boundary
+    truncated = doc.content[:char_limit]
+    last_newline = truncated.rfind("\n")
+    if last_newline > char_limit // 2:
+        truncated = truncated[:last_newline]
+
+    truncated += "\n\n[... truncated to fit token budget ...]"
+
+    return SharedDocument(
+        id=doc.id,
+        title=doc.title,
+        slug=doc.slug,
+        content=truncated,
+        category=doc.category,
+        tags=doc.tags,
+        priority=doc.priority,
+        token_count=len(truncated) // 4,
+        content_hash=doc.content_hash,
+        collection_id=doc.collection_id,
+        collection_name=doc.collection_name,
+        collection_priority=doc.collection_priority,
+    )
+
+
 def allocate_shared_context_budget(
     context: SharedContext,
     max_tokens: int,
@@ -233,6 +282,7 @@ def allocate_shared_context_budget(
 
     MANDATORY documents are always included first (up to their budget).
     Other categories are filled according to their budget percentages.
+    Documents that exceed the budget are truncated to fit rather than excluded.
 
     Args:
         context: The SharedContext with all available documents
@@ -255,40 +305,57 @@ def allocate_shared_context_budget(
     selected: list[SharedDocument] = []
     total_used = 0
 
+    def _try_add_doc(doc: SharedDocument, category_budget: int) -> bool:
+        """Try to add a document, truncating if necessary. Returns True if added."""
+        nonlocal total_used
+
+        remaining_category = category_budget - category_used[doc.category]
+        remaining_total = max_tokens - total_used
+
+        if remaining_category <= 0 or remaining_total <= 0:
+            return False
+
+        available = min(remaining_category, remaining_total)
+
+        # If doc fits, add as-is
+        if doc.token_count <= available:
+            selected.append(doc)
+            category_used[doc.category] += doc.token_count
+            total_used += doc.token_count
+            return True
+
+        # Document too large — truncate to fit (min 100 tokens to be useful)
+        if available >= 100:
+            truncated = _truncate_document(doc, available)
+            selected.append(truncated)
+            category_used[doc.category] += truncated.token_count
+            total_used += truncated.token_count
+            return True
+
+        return False
+
     # First pass: Include MANDATORY documents
     for doc in context.documents:
         if doc.category != DocumentCategory.MANDATORY:
             continue
-
-        budget = category_token_budgets[DocumentCategory.MANDATORY]
-        if category_used[DocumentCategory.MANDATORY] + doc.token_count <= budget:
-            if total_used + doc.token_count <= max_tokens:
-                selected.append(doc)
-                category_used[DocumentCategory.MANDATORY] += doc.token_count
-                total_used += doc.token_count
+        _try_add_doc(doc, category_token_budgets[DocumentCategory.MANDATORY])
 
     # Second pass: Include other categories
     for doc in context.documents:
         if doc.category == DocumentCategory.MANDATORY:
             continue  # Already processed
-
         budget = category_token_budgets.get(doc.category, 0)
-        if category_used[doc.category] + doc.token_count <= budget:
-            if total_used + doc.token_count <= max_tokens:
-                selected.append(doc)
-                category_used[doc.category] += doc.token_count
-                total_used += doc.token_count
+        _try_add_doc(doc, budget)
 
-    # Third pass: Fill remaining budget with any category
+    # Third pass: Fill remaining budget with any category (use full remaining as budget)
     remaining = max_tokens - total_used
     for doc in context.documents:
         if doc in selected:
             continue
-
-        if doc.token_count <= remaining:
-            selected.append(doc)
-            total_used += doc.token_count
-            remaining -= doc.token_count
+        if remaining < 100:
+            break
+        _try_add_doc(doc, remaining)
+        remaining = max_tokens - total_used
 
     return selected
 
