@@ -177,20 +177,38 @@ class EmbeddingsService:
 
         Returns:
             List of similarity scores (0 to 1).
+
+        Raises:
+            ValueError: If embeddings have inconsistent dimensions.
         """
         if not doc_embeddings:
             return []
 
-        query = np.array(query_embedding)
-        docs = np.array(doc_embeddings)
+        try:
+            query = np.array(query_embedding)
+            docs = np.array(doc_embeddings)
 
-        # Normalize vectors
-        query_norm = query / (np.linalg.norm(query) + 1e-10)
-        docs_norm = docs / (np.linalg.norm(docs, axis=1, keepdims=True) + 1e-10)
+            # Validate dimensions
+            if docs.ndim != 2:
+                raise ValueError(
+                    f"Document embeddings must be 2-dimensional, got shape {docs.shape}. "
+                    "This indicates inconsistent embedding dimensions."
+                )
 
-        # Cosine similarity
-        similarities = np.dot(docs_norm, query_norm)
-        return similarities.tolist()
+            # Normalize vectors
+            query_norm = query / (np.linalg.norm(query) + 1e-10)
+            docs_norm = docs / (np.linalg.norm(docs, axis=1, keepdims=True) + 1e-10)
+
+            # Cosine similarity
+            similarities = np.dot(docs_norm, query_norm)
+            return similarities.tolist()
+        except ValueError as e:
+            # Re-raise ValueError with context
+            logger.error(f"Cosine similarity dimension error: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error in cosine similarity: {e}")
+            raise ValueError(f"Failed to calculate cosine similarity: {e}") from e
 
     @property
     def dimension(self) -> int:

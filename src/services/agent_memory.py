@@ -12,7 +12,7 @@ from typing import Any
 
 from ..db import get_db
 from .cache import get_redis
-from .embeddings import get_embeddings_service
+from .embeddings import EMBEDDING_DIMENSION, get_embeddings_service
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,23 @@ def calculate_confidence_decay(
     decayed = initial_confidence * decay_factor
 
     return max(decayed, MIN_CONFIDENCE)
+
+
+def _is_valid_embedding(embedding: Any) -> bool:
+    """Validate that an embedding has the correct structure and dimensions.
+
+    Args:
+        embedding: The embedding to validate
+
+    Returns:
+        True if embedding is valid (list of EMBEDDING_DIMENSION floats)
+    """
+    if not isinstance(embedding, list):
+        return False
+    if len(embedding) != EMBEDDING_DIMENSION:
+        return False
+    # Check that all elements are numbers (int or float)
+    return all(isinstance(x, (int, float)) for x in embedding)
 
 
 async def _get_memory_embedding(memory_id: str) -> list[float] | None:
@@ -106,9 +123,18 @@ async def _get_memory_embeddings_batch(memory_ids: list[str]) -> dict[str, list[
         for mid, value in zip(memory_ids, values):
             if value:
                 try:
-                    result[mid] = json.loads(value)
+                    embedding = json.loads(value)
+                    # Validate embedding structure and dimensions
+                    if _is_valid_embedding(embedding):
+                        result[mid] = embedding
+                    else:
+                        logger.warning(
+                            f"Invalid embedding for memory {mid}: "
+                            f"expected {EMBEDDING_DIMENSION} dimensions, "
+                            f"got {len(embedding) if isinstance(embedding, list) else 'non-list'}"
+                        )
                 except json.JSONDecodeError:
-                    pass
+                    logger.warning(f"Failed to parse embedding JSON for memory {mid}")
         return result
     except Exception as e:
         logger.warning(f"Error getting memory embeddings batch: {e}")
@@ -358,7 +384,17 @@ async def semantic_recall(
 
     # Calculate similarities
     doc_embeddings = [emb for _, emb in memory_embeddings]
-    similarities = embeddings_service.cosine_similarity(query_embedding, doc_embeddings)
+    try:
+        similarities = embeddings_service.cosine_similarity(query_embedding, doc_embeddings)
+    except ValueError as e:
+        logger.error(
+            f"Failed to calculate similarities due to dimension mismatch: {e}. "
+            "This indicates corrupted embeddings in cache. Falling back to text search."
+        )
+        # Fallback to text search if embeddings are corrupted
+        return await _text_search_fallback(
+            memories, query, limit, min_relevance, start_time
+        )
 
     # Score and rank
     results = []
