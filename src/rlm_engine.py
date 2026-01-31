@@ -8,6 +8,7 @@ and provides various query tools.
 import asyncio
 import hashlib
 import logging
+import math
 import re
 import uuid
 from collections import deque
@@ -1149,12 +1150,34 @@ class RLMEngine:
                     # Allocate shared documents within budget
                     allocated_docs = allocate_shared_context_budget(shared_ctx, shared_budget)
 
+                    # Query-aware filtering: only include shared docs that have
+                    # some relevance to the query. MANDATORY docs always included.
+                    # Uses title + first 200 chars (intro) to avoid false positives
+                    # from large docs that mention common keywords in code examples.
+                    query_keywords = {
+                        w for w in re.findall(r"\w+", query.lower()) if len(w) >= 3
+                    }
+
                     # Convert shared documents to ContextSection format
                     for doc in allocated_docs:
                         try:
                             cat_enum = DocumentCategoryEnum(doc.category.value)
                         except ValueError:
                             cat_enum = DocumentCategoryEnum.BEST_PRACTICES
+
+                        # MANDATORY docs always included; others need query relevance
+                        if cat_enum != DocumentCategoryEnum.MANDATORY and query_keywords:
+                            check_text = (
+                                doc.title.lower() + " " + doc.content[:200].lower()
+                            )
+                            hits = sum(1 for kw in query_keywords if kw in check_text)
+                            relevance = hits / len(query_keywords) if query_keywords else 0
+                            if relevance < 0.15:
+                                logger.debug(
+                                    f"Skipping shared doc '{doc.title}' "
+                                    f"(relevance={relevance:.2f} < 0.15)"
+                                )
+                                continue
 
                         shared_context_sections.append(
                             ContextSection(
@@ -1459,30 +1482,48 @@ class RLMEngine:
         Calculate keyword relevance score for a section.
 
         Scoring factors:
-        - Title matches weighted 3x
-        - Content matches weighted 1x
-        - Exact phrase matches weighted 2x
+        - Title matches weighted 5x (not length-normalized)
+        - Content matches weighted 1x (BM25-style length normalization)
         - Section level bonus (higher level = more important)
+        - Title keyword coverage boost (multi-keyword title match)
         """
         score = 0.0
         title_lower = section.title.lower()
         content_lower = section.content.lower()
 
+        # BM25-style length normalization for content scoring.
+        # Prevents long sections from dominating via raw keyword counts.
+        # avgdl ~2000 chars is a reasonable average section length.
+        content_length = len(content_lower)
+        length_norm = 1.0 / (1.0 + 0.75 * (content_length / 2000.0 - 1.0))
+        length_norm = max(length_norm, 0.15)  # Floor to avoid near-zero
+
+        title_keyword_hits = 0
+        significant_keywords = [k for k in keywords if len(k) >= 2]
+
         for keyword in keywords:
             if len(keyword) < 2:  # Skip very short words
                 continue
 
-            # Title matches (3x weight)
+            # Title matches (5x weight, not length-normalized)
             title_count = title_lower.count(keyword)
-            score += title_count * 3.0
+            if title_count > 0:
+                title_keyword_hits += 1
+            score += title_count * 5.0
 
-            # Content matches (1x weight)
+            # Content matches (length-normalized)
             content_count = content_lower.count(keyword)
-            score += content_count * 1.0
+            score += content_count * length_norm
 
         # Bonus for higher-level sections (h1, h2 more important)
         level_bonus = max(0, 4 - section.level) * 0.5
         score += level_bonus if score > 0 else 0
+
+        # Title keyword coverage boost: when multiple query keywords appear
+        # in the section title, this section is likely a direct topical match.
+        # Apply multiplicative boost proportional to the number of title hits.
+        if title_keyword_hits >= 2:
+            score *= 1.0 + title_keyword_hits * 2.0
 
         return score
 
