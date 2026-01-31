@@ -1,5 +1,6 @@
 // Prisma schema for MCP Server (Python client)
-// This should mirror the main schema in packages/database
+// IMPORTANT: This MUST mirror the main schema in packages/database exactly.
+// Any drift will cause `prisma db push --accept-data-loss` to DROP columns.
 
 generator client {
   provider             = "prisma-client-py"
@@ -15,7 +16,7 @@ datasource db {
 }
 
 // ============================================
-// User & Auth Models (read-only for MCP server)
+// NextAuth.js Models
 // ============================================
 
 model User {
@@ -27,14 +28,37 @@ model User {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
+  // Notification preferences (stored as JSON)
+  notificationPrefs Json @default("{\"emailNotifications\":true,\"usageAlerts\":true,\"billingNotifications\":true}")
+
+  // Relations
   accounts          Account[]
   sessions          Session[]
   teamMembers       TeamMember[]
   apiKeys           ApiKey[]
   teamApiKeys       TeamApiKey[]
-  oauthTokens       OAuthToken[]
   sharedCollections SharedContextCollection[]
+  oauthTokens       OAuthToken[]
+
+  // Snipara Agents relations
   agentsSubscriptions AgentsSubscription[]
+
+  // Consent tracking
+  cookiesAcceptedAt    DateTime?
+  termsAcceptedAt      DateTime?
+  privacyAcceptedAt    DateTime?
+
+  // Registration source tracking (for plugin auto-registration analytics)
+  registrationSource String? // "web", "vscode", "claude-code", "cursor", "device-flow"
+
+  // Ban status (Admin Dashboard)
+  isBanned      Boolean   @default(false)
+  bannedAt      DateTime?
+  bannedReason  String?
+
+  // Admin audit log relations
+  adminActions  AdminAuditLog[] @relation("AdminActions")
+  adminTargets  AdminAuditLog[] @relation("AdminTargets")
 
   @@map("users")
 }
@@ -88,16 +112,32 @@ model Team {
   name      String
   slug      String   @unique
   image     String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  isPersonal Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
+  // SSO Settings (Enterprise)
+  ssoEnabled    Boolean @default(false)
+  ssoProvider   String? // "saml" | "oidc" | "auth0"
+  ssoEntityId   String?
+  ssoSignOnUrl  String?
+  ssoCertificate String? @db.Text
+  ssoMetadataUrl String?
+
+  // Relations
   members           TeamMember[]
   invites           TeamInvite[]
   projects          Project[]
   subscription      Subscription?
-  teamApiKeys       TeamApiKey[]
   teamContexts      TeamContext[]
+  auditLogs         AuditLog[]
   sharedCollections SharedContextCollection[]
+  teamApiKeys       TeamApiKey[]
+
+  // Permission system (TEAM+ plans only)
+  permissionConfig TeamPermissionConfig?
+
+  // Snipara Agents relations
   agentsSubscriptions AgentsSubscription[]
 
   @@map("teams")
@@ -109,10 +149,16 @@ model TeamMember {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // Relations
   userId String
   teamId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
   team   Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  // Permission system relations
+  permissions    TeamPermission[]
+  projectAccess  ProjectMember[]
+  accessRequests AccessRequest[]
 
   @@unique([userId, teamId])
   @@map("team_members")
@@ -126,6 +172,7 @@ model TeamInvite {
   expiresAt DateTime
   createdAt DateTime @default(now())
 
+  // Relations
   teamId String
   team   Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
 
@@ -139,6 +186,107 @@ enum Role {
   MEMBER
 }
 
+enum PermissionMode {
+  SIMPLE   // Role-based defaults only (backward compatible)
+  ADVANCED // Fine-grained permissions enabled
+}
+
+enum ProjectAccessLevel {
+  NONE   // Can list project, cannot access MCP (must request access)
+  VIEWER // Read-only: view project, query MCP, view docs
+  EDITOR // Read-write: manage docs, inject context
+  ADMIN  // Full access: API keys, automation, delete
+}
+
+enum AccessRequestStatus {
+  PENDING   // Waiting for approval
+  APPROVED  // Request approved (ProjectMember created)
+  DENIED    // Request denied
+  CANCELLED // Requester cancelled
+}
+
+// Team permission configuration (opt-in toggle for TEAM+ plans)
+model TeamPermissionConfig {
+  id     String         @id @default(cuid())
+  teamId String         @unique
+  team   Team           @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  mode PermissionMode @default(SIMPLE)
+
+  // Feature flags (which permissions are enforced)
+  projectAccessControlEnabled Boolean @default(false)
+  billingAccessControlEnabled Boolean @default(false)
+  agentsAccessControlEnabled  Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("team_permission_configs")
+}
+
+// Team-level permission overrides per member
+model TeamPermission {
+  id           String     @id @default(cuid())
+  teamMemberId String
+  teamMember   TeamMember @relation(fields: [teamMemberId], references: [id], onDelete: Cascade)
+
+  permission String   // e.g., "team.billing.view", "team.agents.access"
+  granted    Boolean? // true=grant, false=deny, null=inherit from role
+
+  grantedBy String?
+  grantedAt DateTime @default(now())
+
+  @@unique([teamMemberId, permission])
+  @@index([teamMemberId])
+  @@map("team_permissions")
+}
+
+// Project-level access (junction table for fine-grained control)
+model ProjectMember {
+  id           String             @id @default(cuid())
+  projectId    String
+  project      Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  teamMemberId String
+  teamMember   TeamMember         @relation(fields: [teamMemberId], references: [id], onDelete: Cascade)
+
+  accessLevel ProjectAccessLevel @default(VIEWER)
+
+  grantedBy String?
+  grantedAt DateTime @default(now())
+
+  @@unique([projectId, teamMemberId])
+  @@index([projectId])
+  @@index([teamMemberId])
+  @@map("project_members")
+}
+
+// Access requests for project-level permissions
+model AccessRequest {
+  id           String             @id @default(cuid())
+  projectId    String
+  project      Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  teamMemberId String
+  teamMember   TeamMember         @relation(fields: [teamMemberId], references: [id], onDelete: Cascade)
+
+  // Request details
+  requestedLevel ProjectAccessLevel  @default(VIEWER)
+  reason         String?             @db.Text
+  status         AccessRequestStatus @default(PENDING)
+
+  // Resolution
+  resolvedBy  String?
+  resolvedAt  DateTime?
+  denyReason  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([projectId, teamMemberId, status])
+  @@index([projectId, status])
+  @@index([teamMemberId, status])
+  @@map("access_requests")
+}
+
 // ============================================
 // Project Models
 // ============================================
@@ -148,30 +296,58 @@ model Project {
   name        String
   slug        String
   description String?
-  icon        String?  @db.Text
+  icon        String?  @db.Text  // Base64 encoded image data URL
   githubRepo  String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  // Automation settings (synced from dashboard)
-  automationClient      String  @default("claude-code")
+  // GitHub sync settings
+  githubBranch        String?   // Branch to sync (default: main)
+  githubPath          String?   // Path filter (e.g., "docs/")
+  githubLastSyncAt    DateTime?
+  githubLastCommitSha String?
+  githubSyncEnabled   Boolean   @default(false)
+  githubWebhookId     String?   // GitHub webhook ID for auto-sync
+
+  // Automation settings
+  automationClient      String  @default("claude-code") // claude-code, cursor, continue, windsurf, codex, custom
   autoInjectContext     Boolean @default(false)
   trackAccessedFiles    Boolean @default(false)
   preserveOnCompaction  Boolean @default(true)
   restoreOnSessionStart Boolean @default(true)
   enrichPrompts         Boolean @default(false)
   maxTokensPerQuery     Int     @default(4000)
-  searchMode            String  @default("hybrid")
+  searchMode            String  @default("hybrid") // keyword, semantic, hybrid
   includeSummaries      Boolean @default(true)
+  memoryInjectionEnabled Boolean @default(false) // Agents feature: inject memories on session start
 
+  // Memory Injection Filter Settings
+  memoryInjectTypes               String[] @default(["FACT", "DECISION", "LEARNING", "PREFERENCE", "TODO", "CONTEXT"])
+  memoryExcludeSessionCheckpoints Boolean  @default(false) // Exclude category="session" from injection
+  memoryMinConfidence             Float    @default(0.2)   // Minimum confidence for injection (0-1)
+  memoryRecallQuery               String?  // Custom recall query template, supports {project_name}, {project_slug}
+  memorySaveOnCommit              Boolean  @default(false) // Save memory when git commit is detected
+
+  systemInstructions    String? @db.Text // Custom instructions to prepend to every query response
+
+  // Relations
   teamId         String
   team           Team             @relation(fields: [teamId], references: [id], onDelete: Cascade)
   documents      Document[]
   sessionContext SessionContext[]
   apiKeys        ApiKey[]
   queries        Query[]
-  oauthTokens    OAuthToken[]
+  checkpoints    SessionCheckpoint[]
   sharedContexts ProjectSharedContext[]
+  oauthTokens    OAuthToken[]
+
+  // Permission system (project-level access)
+  members        ProjectMember[]
+  accessRequests AccessRequest[]
+
+  // Snipara Agents relations
+  queryCaches    QueryCache[]
+  cacheStats     CacheStats?
   agentMemories  AgentMemory[]
   memoryStats    MemoryStats?
   agentSwarms    AgentSwarm[]
@@ -189,18 +365,35 @@ model Document {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // Relations
   projectId String
   project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
   chunks    DocumentChunk[]
   summaries DocumentSummary[]
+  versions  DocumentVersion[]
 
   @@unique([projectId, path])
   @@index([projectId])
   @@map("documents")
 }
 
-/// Document chunk with embedding for semantic search
-/// Note: embedding field uses raw SQL via pgvector extension
+model DocumentVersion {
+  id        String   @id @default(cuid())
+  content   String   @db.Text
+  hash      String
+  size      Int
+  version   Int      // Version number (1, 2, 3...)
+  createdAt DateTime @default(now())
+
+  // Relations
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, version])
+  @@index([documentId])
+  @@map("document_versions")
+}
+
 model DocumentChunk {
   id         String                    @id @default(cuid())
   content    String                    @db.Text
@@ -211,6 +404,7 @@ model DocumentChunk {
   title      String?
   createdAt  DateTime                  @default(now())
 
+  // Relations
   documentId String
   document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
 
@@ -260,19 +454,45 @@ model DocumentSummary {
 }
 
 model SessionContext {
-  id        String    @id @default(cuid())
+  id        String   @id @default(cuid())
   key       String
-  value     String    @db.Text
+  value     String   @db.Text
   expiresAt DateTime?
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
+  // Relations
   projectId String
   project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@unique([projectId, key])
   @@index([projectId])
   @@map("session_contexts")
+}
+
+// ============================================
+// Session Checkpoint Models (for hook-based automation)
+// ============================================
+
+model SessionCheckpoint {
+  id           String   @id @default(cuid())
+  sessionId    String   // Client session ID (from Claude Code, etc.)
+  content      String   @db.Text // Full checkpoint content (markdown)
+  filesTracked String[] // Array of file paths tracked in this session
+  commands     String[] // Array of recent commands executed
+  task         String?  // Current task description
+  source       String   @default("precompact") // precompact, manual, auto
+  expiresAt    DateTime // When this checkpoint should be cleaned up
+  createdAt    DateTime @default(now())
+
+  // Relations
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, createdAt])
+  @@index([sessionId])
+  @@index([expiresAt])
+  @@map("session_checkpoints")
 }
 
 // ============================================
@@ -289,6 +509,7 @@ model ApiKey {
   createdAt  DateTime  @default(now())
   revokedAt  DateTime?
 
+  // Relations
   userId    String
   projectId String
   user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -309,6 +530,7 @@ model TeamApiKey {
   createdAt  DateTime  @default(now())
   revokedAt  DateTime?
 
+  // Relations
   userId String
   teamId String
   user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -345,6 +567,9 @@ model DeviceCode {
   status         DeviceCodeStatus @default(PENDING)
   authorizedAt   DateTime?
   authorizedById String? // User who authorized
+
+  // Auto-provisioning (for plugin auto-registration)
+  autoProvision Boolean @default(false)
 
   // Expiration and polling
   expiresAt DateTime
@@ -410,12 +635,68 @@ model Query {
   errorMessage String?
   createdAt    DateTime @default(now())
 
+  // Relations
   projectId String
   project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@index([projectId, createdAt])
   @@index([createdAt])
   @@map("queries")
+}
+
+// ============================================
+// Team Context Models (Shared Context)
+// ============================================
+
+model TeamContext {
+  id          String   @id @default(cuid())
+  name        String   // Display name for the context
+  key         String   // Unique key within team
+  value       String   @db.Text
+  description String?
+  isActive    Boolean  @default(true)
+  priority    Int      @default(0) // Higher priority contexts are loaded first
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Who created/updated this context
+  createdById String
+  updatedById String?
+
+  // Relations
+  teamId String
+  team   Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, key])
+  @@index([teamId, isActive])
+  @@map("team_contexts")
+}
+
+// ============================================
+// Audit Log Models (Enterprise)
+// ============================================
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  action     String   // e.g., "project.create", "document.delete", "team.member.add"
+  entityType String   // e.g., "project", "document", "team"
+  entityId   String   // ID of the affected entity
+  details    Json?    // Additional details about the action
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  // Who performed the action
+  actorId String
+
+  // Which team this audit log belongs to
+  teamId String
+  team   Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@index([teamId, createdAt])
+  @@index([actorId])
+  @@index([entityType, entityId])
+  @@map("audit_logs")
 }
 
 // ============================================
@@ -435,6 +716,7 @@ model Subscription {
   createdAt            DateTime           @default(now())
   updatedAt            DateTime           @updatedAt
 
+  // Relations
   teamId String @unique
   team   Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
 
@@ -457,46 +739,20 @@ enum SubscriptionStatus {
 }
 
 // ============================================
-// Team Context (auto-applied to all team projects)
-// ============================================
-
-model TeamContext {
-  id          String   @id @default(cuid())
-  name        String
-  key         String
-  value       String   @db.Text
-  description String?
-  isActive    Boolean  @default(true)
-  priority    Int      @default(0)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  createdById String
-  updatedById String?
-
-  teamId String
-  team   Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
-
-  @@unique([teamId, key])
-  @@index([teamId, isActive])
-  @@map("team_contexts")
-}
-
-// ============================================
 // Shared Context Collections
 // ============================================
 
 enum SharedContextScope {
-  GLOBAL
-  TEAM
-  USER
+  GLOBAL // Public templates anyone can use/fork
+  TEAM   // Shared within a team
+  USER   // Personal across user's projects
 }
 
 enum DocumentCategory {
-  MANDATORY
-  BEST_PRACTICES
-  GUIDELINES
-  REFERENCE
+  MANDATORY       // Must be followed (highest priority within tier)
+  BEST_PRACTICES  // Recommended patterns
+  GUIDELINES      // Nice-to-have suggestions
+  REFERENCE       // Background info, examples
 }
 
 model SharedContextCollection {
@@ -506,22 +762,33 @@ model SharedContextCollection {
   description String?            @db.Text
   scope       SharedContextScope
 
+  // Ownership (depends on scope)
   ownerId String?
   owner   User?   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   teamId  String?
   team    Team?   @relation(fields: [teamId], references: [id], onDelete: Cascade)
 
-  isPublic   Boolean @default(false)
-  isOfficial Boolean @default(false)
+  // Visibility
+  isPublic   Boolean @default(false) // GLOBAL can be public
+  isOfficial Boolean @default(false) // Curated by us
 
-  usageCount Int @default(0)
+  // Stats
+  usageCount Int @default(0) // How many projects use this
 
+  // Content
   documents       SharedDocument[]
   mcpConfig       SharedMcpConfig?
   promptTemplates PromptTemplate[]
-  projectLinks    ProjectSharedContext[]
 
-  version   Int      @default(1)
+  // Projects using this collection
+  projectLinks ProjectSharedContext[]
+
+  // Discovery
+  discoveryRuns      DiscoveryRun[]
+  discoveredPatterns DiscoveredPattern[]
+
+  // Metadata
+  version   Int      @default(1) // For cache invalidation
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -537,18 +804,22 @@ model SharedDocument {
   collectionId String
   collection   SharedContextCollection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
 
+  // Content
   title   String
   slug    String
   content String @db.Text
 
+  // Classification
   category DocumentCategory @default(BEST_PRACTICES)
   tags     String[]
 
+  // Pre-computed (for performance)
   tokenCount  Int     @default(0)
-  contentHash String
-  embedding   Bytes?
+  contentHash String // SHA256 for change detection
+  embedding   Bytes? // Pre-computed embedding vector
 
-  priority Int @default(0)
+  // Ordering
+  priority Int @default(0) // Within category
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -564,12 +835,15 @@ model SharedMcpConfig {
   collectionId String                  @unique
   collection   SharedContextCollection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
 
+  // Tool configuration
   enabledTools  String[]
   disabledTools String[]
 
+  // Default parameters
   defaultMaxTokens  Int?
-  defaultSearchMode String?
+  defaultSearchMode String? // "hybrid", "semantic", "keyword"
 
+  // Auto-provisioning rules
   autoProvision Json?
 
   createdAt DateTime @default(now())
@@ -583,14 +857,17 @@ model PromptTemplate {
   collectionId String
   collection   SharedContextCollection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
 
+  // Identity
   name        String
   slug        String
   description String?
 
+  // Content
   prompt    String   @db.Text
-  variables String[]
+  variables String[] // e.g., ["file_path", "language"]
 
-  category String
+  // Classification
+  category String // "refactoring", "security", "review"
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -608,13 +885,16 @@ model ProjectSharedContext {
   collectionId String
   collection   SharedContextCollection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
 
-  priority  Int     @default(0)
+  // Configuration per link
+  priority  Int     @default(0) // Order in inheritance chain
   isEnabled Boolean @default(true)
 
-  tokenBudgetPercent Int?
-  enabledCategories  DocumentCategory[]
+  // Overrides
+  tokenBudgetPercent Int?               // Override default allocation %
+  enabledCategories  DocumentCategory[] // Filter to specific categories
 
-  acknowledgedConflicts Json?
+  // Conflict acknowledgment
+  acknowledgedConflicts Json? // Conflicts user accepted
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -626,7 +906,142 @@ model ProjectSharedContext {
 }
 
 // ============================================
-// Snipara Agents - Memory (Phase 8)
+// Best Practices Discovery
+// ============================================
+
+enum DiscoveryStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+model DiscoveryRun {
+  id           String                  @id @default(cuid())
+  collectionId String
+  collection   SharedContextCollection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+
+  // Status
+  status       DiscoveryStatus @default(PENDING)
+  progress     Int             @default(0) // 0-100
+  errorMessage String?
+
+  // Results
+  patternsFound      Int       @default(0)
+  patternsAdopted    Int       @default(0) // How many patterns were added to collection
+  suggestionsGenerated Int     @default(0)
+  suggestionsAccepted  Int     @default(0)
+
+  // Metadata
+  projectsScanned    Int       @default(0)
+  documentsAnalyzed  Int       @default(0)
+  tokensUsed         Int       @default(0)
+
+  // Timestamps
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  // Results stored as JSON
+  results     Json?     // Array of DiscoveredPattern objects
+
+  // Who triggered the discovery
+  triggeredById String
+
+  @@index([collectionId, createdAt])
+  @@index([status])
+  @@map("discovery_runs")
+}
+
+// Track discovered patterns for review
+model DiscoveredPattern {
+  id           String                  @id @default(cuid())
+  collectionId String
+  collection   SharedContextCollection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+
+  // Pattern info
+  title       String
+  description String  @db.Text
+  content     String  @db.Text // The actual best practice content
+  category    DocumentCategory @default(BEST_PRACTICES)
+
+  // Discovery metadata
+  source      String   // "scanned" or "ai_suggested"
+  adoptionRate Float   @default(0) // 0-1, how many linked projects have this pattern
+  projectsUsing String[] // Array of project IDs that implement this pattern
+
+  // Status
+  status      String   @default("pending") // pending, accepted, rejected
+  rejectedReason String?
+
+  // If accepted, link to the created SharedDocument
+  adoptedDocumentId String?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([collectionId, status])
+  @@index([collectionId, adoptionRate])
+  @@map("discovered_patterns")
+}
+
+// ============================================
+// Snipara Agents - Context Caching (Phase 8.1)
+// ============================================
+
+model QueryCache {
+  id            String   @id @default(cuid())
+  projectId     String
+
+  // Cache key
+  queryHash     String   // SHA-256 of normalized query params
+
+  // Cached response
+  sections      Json     // Array of section objects
+  totalTokens   Int
+  suggestions   String[]
+
+  // Metadata
+  hitCount      Int      @default(0)
+  lastHitAt     DateTime?
+  createdAt     DateTime @default(now())
+  expiresAt     DateTime
+
+  // Invalidation tracking
+  documentVersions Json  // { docId: versionHash } for invalidation
+
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, queryHash])
+  @@index([projectId, expiresAt])
+  @@index([expiresAt])
+  @@map("query_caches")
+}
+
+model CacheStats {
+  id            String   @id @default(cuid())
+  projectId     String   @unique
+
+  // Counters (reset monthly)
+  l1Hits        Int      @default(0)
+  l1Misses      Int      @default(0)
+  l2Hits        Int      @default(0)
+  l2Misses      Int      @default(0)
+
+  // Cost savings
+  tokensSaved   BigInt   @default(0)
+  computeMsSaved BigInt  @default(0)
+
+  periodStart   DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@map("cache_stats")
+}
+
+// ============================================
+// Snipara Agents - Agent Memory Layer (Phase 8.2)
 // ============================================
 
 enum MemoryType {
@@ -925,4 +1340,27 @@ model AgentsSubscription {
   @@unique([userId, teamId])
   @@index([stripeSubscriptionId])
   @@map("agents_subscriptions")
+}
+
+// ============================================
+// Admin Audit Log (Platform Admin)
+// ============================================
+
+model AdminAuditLog {
+  id           String   @id @default(cuid())
+  adminId      String
+  action       String   // BAN_USER, UNBAN_USER, CHANGE_PLAN, etc.
+  targetUserId String?
+  details      Json?
+  ipAddress    String?
+  createdAt    DateTime @default(now())
+
+  admin      User  @relation("AdminActions", fields: [adminId], references: [id], onDelete: Cascade)
+  targetUser User? @relation("AdminTargets", fields: [targetUserId], references: [id], onDelete: SetNull)
+
+  @@index([adminId])
+  @@index([targetUserId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("admin_audit_logs")
 }
