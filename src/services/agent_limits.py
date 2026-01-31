@@ -81,6 +81,11 @@ async def get_agents_subscription(project_id: str) -> dict[str, Any] | None:
     """
     db = await get_db()
 
+    # Check if AgentsSubscription model is available in the Prisma client
+    if not hasattr(db, "agentssubscription"):
+        logger.warning("AgentsSubscription model not available in Prisma client - needs regeneration")
+        return None
+
     # Get project with team info
     project = await db.project.find_unique(
         where={"id": project_id},

@@ -186,7 +186,27 @@ class EmbeddingsService:
 
         try:
             query = np.array(query_embedding)
-            docs = np.array(doc_embeddings)
+            expected_dim = len(query_embedding)
+
+            # Filter out embeddings with mismatched dimensions
+            valid_embeddings = []
+            invalid_indices = []
+            for idx, emb in enumerate(doc_embeddings):
+                if len(emb) == expected_dim:
+                    valid_embeddings.append(emb)
+                else:
+                    invalid_indices.append(idx)
+
+            if invalid_indices:
+                logger.warning(
+                    f"Filtered {len(invalid_indices)} embeddings with wrong dimensions "
+                    f"(expected {expected_dim}): indices {invalid_indices[:10]}"
+                )
+
+            if not valid_embeddings:
+                return [0.0] * len(doc_embeddings)
+
+            docs = np.array(valid_embeddings)
 
             # Validate dimensions
             if docs.ndim != 2:
@@ -200,8 +220,20 @@ class EmbeddingsService:
             docs_norm = docs / (np.linalg.norm(docs, axis=1, keepdims=True) + 1e-10)
 
             # Cosine similarity
-            similarities = np.dot(docs_norm, query_norm)
-            return similarities.tolist()
+            valid_similarities = np.dot(docs_norm, query_norm).tolist()
+
+            # Reconstruct full result list with 0.0 for invalid embeddings
+            if invalid_indices:
+                invalid_set = set(invalid_indices)
+                result = [0.0] * len(doc_embeddings)
+                valid_idx = 0
+                for i in range(len(doc_embeddings)):
+                    if i not in invalid_set:
+                        result[i] = valid_similarities[valid_idx]
+                        valid_idx += 1
+                return result
+
+            return valid_similarities
         except ValueError as e:
             # Re-raise ValueError with context
             logger.error(f"Cosine similarity dimension error: {e}")
