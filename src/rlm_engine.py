@@ -1230,6 +1230,50 @@ class RLMEngine:
         max_sections = 15
         scored_sections = scored_sections[:max_sections]
 
+        # ---- Relevance floor ----
+        # Drop sections below 80% of the top score (i.e. below 0.8 normalised
+        # relevance).  This prevents low-relevance padding that wastes budget
+        # without improving quality.  Keep at least 3 sections so narrow queries
+        # still return useful context.
+        min_keep = 3
+        if scored_sections:
+            top_score = scored_sections[0][1]
+            relevance_floor = top_score * 0.80
+            above_floor = [
+                (s, sc) for s, sc in scored_sections if sc >= relevance_floor
+            ]
+            scored_sections = (
+                above_floor if len(above_floor) >= min_keep
+                else scored_sections[:max(min_keep, len(above_floor))]
+            )
+
+        # ---- Title-similarity dedup ----
+        # Sections with near-identical titles (e.g. "MCP Server Issues" and
+        # "MCP Server (`apps/mcp-server/`)") dilute context.  Keep only the
+        # highest-scoring section per title-word cluster.
+        def _title_key(title: str) -> frozenset[str]:
+            """Normalise a section title to a bag of lowercase alpha words."""
+            return frozenset(re.findall(r"[a-z]+", title.lower()))
+
+        seen_title_keys: dict[frozenset[str], float] = {}
+        deduped: list[tuple[Section, float]] = []
+        for section, score in scored_sections:
+            tkey = _title_key(section.title)
+            # Two titles are "similar" if one is a subset of the other or
+            # they share >= 70 % of their words.
+            duplicate = False
+            for existing_key, existing_score in seen_title_keys.items():
+                if not tkey or not existing_key:
+                    continue
+                overlap = len(tkey & existing_key) / min(len(tkey), len(existing_key))
+                if overlap >= 0.70:
+                    duplicate = True
+                    break
+            if not duplicate:
+                deduped.append((section, score))
+                seen_title_keys[tkey] = score
+        scored_sections = deduped
+
         # Greedy selection: add sections until budget is exceeded
         selected_sections: list[ContextSection] = []
         suggestions: list[str] = []
