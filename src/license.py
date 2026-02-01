@@ -24,7 +24,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +208,7 @@ async def get_trial_start_date() -> datetime | None:
                 return datetime.fromisoformat(started_at.replace("Z", "+00:00"))
             if isinstance(started_at, datetime):
                 if started_at.tzinfo is None:
-                    return started_at.replace(tzinfo=timezone.utc)
+                    return started_at.replace(tzinfo=UTC)
                 return started_at
         return None
     except Exception as e:
@@ -221,7 +221,7 @@ async def record_trial_start() -> datetime:
     from .db import get_db
 
     db = await get_db()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     try:
         await db.execute_raw(
             """
@@ -265,7 +265,7 @@ async def resolve_license() -> LicenseInfo:
                 is_trial=False,
                 trial_days_left=0,
                 licensed_to=payload.get("sub", "unknown"),
-                expires_at=datetime.fromtimestamp(payload["exp"], tz=timezone.utc),
+                expires_at=datetime.fromtimestamp(payload["exp"], tz=UTC),
                 features=payload.get("features", []),
             )
             _cached_license = info
@@ -279,7 +279,7 @@ async def resolve_license() -> LicenseInfo:
     if trial_start is None:
         trial_start = await record_trial_start()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     trial_end = trial_start + timedelta(days=TRIAL_DURATION_DAYS)
 
     if now < trial_end:

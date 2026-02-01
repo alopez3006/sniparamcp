@@ -4,15 +4,17 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Annotated, AsyncGenerator
+from typing import Annotated
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
+
 from . import __version__
 from .auth import (
     check_team_key_project_access,
@@ -25,7 +27,7 @@ from .auth import (
 )
 from .config import settings
 from .db import close_db, get_db
-from .services.agent_memory import semantic_recall, store_memory
+from .mcp_transport import router as mcp_router
 from .models import (
     HealthResponse,
     LimitsInfo,
@@ -37,6 +39,7 @@ from .models import (
     UsageInfo,
 )
 from .rlm_engine import RLMEngine, count_tokens
+from .services.agent_memory import semantic_recall, store_memory
 from .usage import (
     check_ip_rate_limit,
     check_rate_limit,
@@ -48,7 +51,6 @@ from .usage import (
     record_access_denial,
     track_usage,
 )
-from .mcp_transport import router as mcp_router
 
 logger = logging.getLogger(__name__)
 

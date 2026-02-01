@@ -8,12 +8,10 @@ and provides various query tools.
 import asyncio
 import hashlib
 import logging
-import math
 import re
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any
 
 import tiktoken
@@ -50,45 +48,41 @@ from .models import (
     ToolName,
     UploadDocumentResult,
 )
-from .services.cache import get_cache
+from .services.agent_limits import (
+    check_memory_limits,
+    validate_agents_access,
+)
+from .services.agent_memory import (
+    delete_memories,
+    list_memories,
+    semantic_recall,
+    store_memory,
+)
 from .services.chunker import get_chunker
 from .services.embeddings import get_embeddings_service
 from .services.shared_context import (
+    DocumentCategory,
     allocate_shared_context_budget,
     compute_context_hash,
     create_shared_document,
-    DocumentCategory,
     get_shared_prompt_templates,
     list_shared_collections,
     load_project_shared_context,
     merge_shared_context_with_project_docs,
 )
-from .services.agent_memory import (
-    store_memory,
-    semantic_recall,
-    list_memories,
-    delete_memories,
-)
-from .services.agent_limits import (
-    check_memory_limits,
-    check_swarm_limits,
-    validate_agents_access,
-)
 from .services.swarm_coordinator import (
-    create_swarm,
-    join_swarm,
-    leave_swarm,
     acquire_claim,
-    release_claim,
-    get_state,
-    set_state,
-    create_task,
     claim_task,
     complete_task,
+    create_swarm,
+    create_task,
+    get_state,
+    join_swarm,
+    release_claim,
+    set_state,
 )
 from .services.swarm_events import (
     broadcast_event,
-    get_recent_events,
 )
 
 # ---------------------------------------------------------------------------
@@ -418,7 +412,7 @@ class RLMEngine:
         if self.index is None:
             return
 
-        _MIN_SECTION_TOKENS = 30  # Sections smaller than this get merged upward
+        min_section_tokens = 30  # Sections smaller than this get merged upward
         current_section: Section | None = None
         section_content: list[str] = []
         in_code_block = False
@@ -438,7 +432,7 @@ class RLMEngine:
                     current_section.end_line = offset + i - 1
                     content_tokens = count_tokens(current_section.content)
 
-                    if content_tokens < _MIN_SECTION_TOKENS and self.index.sections:
+                    if content_tokens < min_section_tokens and self.index.sections:
                         # Orphan heading — merge into previous section
                         prev = self.index.sections[-1]
                         prev.content += "\n\n" + current_section.content
@@ -469,7 +463,7 @@ class RLMEngine:
             current_section.end_line = offset + len(lines)
             content_tokens = count_tokens(current_section.content)
 
-            if content_tokens < _MIN_SECTION_TOKENS and self.index.sections:
+            if content_tokens < min_section_tokens and self.index.sections:
                 prev = self.index.sections[-1]
                 prev.content += "\n\n" + current_section.content
                 prev.end_line = current_section.end_line
@@ -884,7 +878,7 @@ class RLMEngine:
                 asyncio.to_thread(search_sync),
                 timeout=settings.regex_timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(f"Regex search timed out for pattern: {pattern[:50]}...")
             return ToolResult(
                 data="Search timed out. Try a simpler pattern.",
@@ -909,9 +903,6 @@ class RLMEngine:
         append = params.get("append", False)
 
         db = await get_db()
-
-        # Generate a key for this context
-        context_key = hashlib.md5(context.encode()).hexdigest()[:8]
 
         if append:
             # Append to existing context
@@ -1081,7 +1072,6 @@ class RLMEngine:
         # Use dashboard settings as defaults, allow request params to override
         max_tokens = params.get("max_tokens", self.settings.max_tokens_per_query)
         search_mode_str = params.get("search_mode", self.settings.search_mode)
-        include_metadata = params.get("include_metadata", True)
         prefer_summaries = params.get("prefer_summaries", self.settings.include_summaries)
         include_shared_context = params.get("include_shared_context", True)
         shared_context_budget_percent = params.get("shared_context_budget_percent", 30)
@@ -1228,17 +1218,17 @@ class RLMEngine:
 
         # Filter out shallow sections (just headings with < 30 tokens of content).
         # These waste context budget slots without contributing useful information.
-        _MIN_USEFUL_TOKENS = 30
+        min_useful_tokens = 30
         scored_sections = [
             (section, score)
             for section, score in scored_sections
-            if count_tokens(section.content) >= _MIN_USEFUL_TOKENS
+            if count_tokens(section.content) >= min_useful_tokens
         ]
 
         # Cap results to top-N sections.  Returning too many dilutes signal-to-noise
         # for the downstream LLM (e.g., 35 sections for a simple definition query).
-        _MAX_SECTIONS = 15
-        scored_sections = scored_sections[:_MAX_SECTIONS]
+        max_sections = 15
+        scored_sections = scored_sections[:max_sections]
 
         # Greedy selection: add sections until budget is exceeded
         selected_sections: list[ContextSection] = []
@@ -1534,7 +1524,6 @@ class RLMEngine:
         length_norm = max(length_norm, 0.15)  # Floor to avoid near-zero
 
         title_keyword_hits = 0
-        significant_keywords = [k for k in keywords if len(k) >= 2]
 
         for keyword in keywords:
             if len(keyword) < 2:  # Skip very short words
@@ -1736,7 +1725,7 @@ class RLMEngine:
             ToolResult with DecomposeResult containing sub-queries and dependencies
         """
         query = params.get("query", "")
-        max_depth = params.get("max_depth", 2)
+        _max_depth = params.get("max_depth", 2)  # noqa: F841 — reserved for future use
         strategy_str = params.get("strategy", "auto")
         hints = params.get("hints", [])
 
@@ -2367,7 +2356,7 @@ class RLMEngine:
 
         if existing:
             # Update existing summary
-            updated = await db.documentsummary.update(
+            await db.documentsummary.update(
                 where={"id": existing.id},
                 data={
                     "summary": summary,

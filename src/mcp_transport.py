@@ -53,8 +53,13 @@ from .auth import get_project_with_team, validate_api_key, validate_oauth_token
 from .config import settings
 from .models import Plan, ToolName
 from .rlm_engine import RLMEngine
-from .usage import check_rate_limit, check_usage_limits, is_scan_blocked, log_security_event, track_usage
-
+from .usage import (
+    check_rate_limit,
+    check_usage_limits,
+    is_scan_blocked,
+    log_security_event,
+    track_usage,
+)
 
 # ============ ROUTER CONFIGURATION ============
 

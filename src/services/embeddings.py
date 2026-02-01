@@ -125,7 +125,7 @@ class EmbeddingsService:
                 timeout=timeout,
             )
             return result
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(f"Embedding timed out after {timeout}s for text of length {len(text)}")
             raise
 
@@ -158,7 +158,7 @@ class EmbeddingsService:
                 timeout=timeout,
             )
             return result
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 f"Batch embedding timed out after {timeout}s for {len(texts)} texts"
             )

@@ -32,7 +32,6 @@ Endpoints (OAuth Bearer — GPT Store):
 - GET  /v1/gpt/me/openapi            - OpenAPI spec for GPT Store (no auth)
 """
 
-import json
 import logging
 import time
 from typing import Annotated, Any
@@ -226,7 +225,7 @@ async def _validate_gpt_oauth_request(
     Returns:
         Tuple of (auth_info, project, plan, project_settings)
     """
-    from .auth import validate_oauth_token_any_project, get_project_settings
+    from .auth import get_project_settings, validate_oauth_token_any_project
     from .usage import check_rate_limit, is_scan_blocked
 
     # Anti-scan check
@@ -1220,7 +1219,7 @@ async def gpt_setup(
             "1. Go to https://chat.openai.com/gpts/editor",
             "2. Click 'Create a GPT' or edit an existing one",
             "3. In the 'Configure' tab, paste the system_prompt into 'Instructions'",
-            f"4. Under 'Actions', click 'Create new action'",
+            "4. Under 'Actions', click 'Create new action'",
             f"5. Paste the OpenAPI spec from: {server_url}/v1/gpt/{project_slug}/openapi",
             "6. Under 'Authentication', select 'API Key' with header name 'X-API-Key'",
             "7. Paste your Snipara API key (rlm_...) as the API key value",

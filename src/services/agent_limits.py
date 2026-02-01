@@ -4,7 +4,7 @@ Enforces plan limits for memories, swarms, and agents.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from ..db import get_db
@@ -457,9 +457,9 @@ async def check_grace_period(
     # Ensure grace_period_end is timezone-aware
     if isinstance(grace_period_end, datetime):
         if grace_period_end.tzinfo is None:
-            grace_period_end = grace_period_end.replace(tzinfo=timezone.utc)
+            grace_period_end = grace_period_end.replace(tzinfo=UTC)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     if now > grace_period_end:
         agents_plan = agents_subscription.get("plan", "UNKNOWN")

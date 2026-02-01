@@ -16,7 +16,7 @@ to avoid extra round-trips.
 """
 
 import hashlib
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from .db import get_db
 
@@ -78,13 +78,13 @@ async def validate_api_key(api_key: str, project_id_or_slug: str) -> dict | None
             return None
 
         # Check if key is expired
-        if api_key_record.expiresAt and api_key_record.expiresAt < datetime.now(timezone.utc):
+        if api_key_record.expiresAt and api_key_record.expiresAt < datetime.now(UTC):
             return None
 
         # Update last used timestamp
         await db.apikey.update(
             where={"id": api_key_record.id},
-            data={"lastUsedAt": datetime.now(timezone.utc)},
+            data={"lastUsedAt": datetime.now(UTC)},
         )
 
         return {
@@ -142,13 +142,13 @@ async def validate_api_key(api_key: str, project_id_or_slug: str) -> dict | None
         return None
 
     # Check if team key is expired
-    if team_key_record.expiresAt and team_key_record.expiresAt < datetime.now(timezone.utc):
+    if team_key_record.expiresAt and team_key_record.expiresAt < datetime.now(UTC):
         return None
 
     # Update last used timestamp for team key
     await db.teamapikey.update(
         where={"id": team_key_record.id},
-        data={"lastUsedAt": datetime.now(timezone.utc)},
+        data={"lastUsedAt": datetime.now(UTC)},
     )
 
     # Check per-project access control for team keys
@@ -275,7 +275,7 @@ async def validate_team_api_key(api_key: str, team_id: str) -> dict | None:
     if not api_key_record:
         return None
 
-    if api_key_record.expiresAt and api_key_record.expiresAt < datetime.now(timezone.utc):
+    if api_key_record.expiresAt and api_key_record.expiresAt < datetime.now(UTC):
         return None
 
     if api_key_record.revokedAt:
@@ -283,7 +283,7 @@ async def validate_team_api_key(api_key: str, team_id: str) -> dict | None:
 
     await db.teamapikey.update(
         where={"id": api_key_record.id},
-        data={"lastUsedAt": datetime.now(timezone.utc)},
+        data={"lastUsedAt": datetime.now(UTC)},
     )
 
     return {
@@ -405,13 +405,13 @@ async def validate_oauth_token(token: str, project_id_or_slug: str) -> dict | No
         return None
 
     # Check if expired
-    if oauth_token.accessExpiresAt < datetime.now(timezone.utc):
+    if oauth_token.accessExpiresAt < datetime.now(UTC):
         return None
 
     # Update last used timestamp
     await db.oauthtoken.update(
         where={"id": oauth_token.id},
-        data={"lastUsedAt": datetime.now(timezone.utc)},
+        data={"lastUsedAt": datetime.now(UTC)},
     )
 
     # Determine access level from OAuth scope
@@ -474,13 +474,13 @@ async def validate_oauth_token_any_project(token: str) -> dict | None:
         return None
 
     # Check if expired
-    if oauth_token.accessExpiresAt < datetime.now(timezone.utc):
+    if oauth_token.accessExpiresAt < datetime.now(UTC):
         return None
 
     # Update last used timestamp
     await db.oauthtoken.update(
         where={"id": oauth_token.id},
-        data={"lastUsedAt": datetime.now(timezone.utc)},
+        data={"lastUsedAt": datetime.now(UTC)},
     )
 
     oauth_access_level = "EDITOR" if "mcp:write" in (oauth_token.scope or "") else "VIEWER"

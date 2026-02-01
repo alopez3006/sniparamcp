@@ -5,14 +5,15 @@ Manages multi-agent swarms, resource claims, shared state, and task queues.
 
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 try:
     from prisma import Json
 except ImportError:
     # Fallback for when Json isn't available (use identity function)
-    Json = lambda x: x
+    def Json(x):  # noqa: N802
+        return x
 
 from ..db import get_db
 from .agent_limits import check_swarm_agent_limits, check_swarm_limits
@@ -138,7 +139,7 @@ async def join_swarm(
         # Update last heartbeat
         await db.swarmagent.update(
             where={"id": existing.id},
-            data={"lastHeartbeat": datetime.now(timezone.utc)},
+            data={"lastHeartbeat": datetime.now(UTC)},
         )
         return {
             "success": True,
@@ -155,7 +156,7 @@ async def join_swarm(
             "agentId": agent_id,
             "name": agent_id,  # Use agent_id as name
             "isActive": True,
-            "lastHeartbeat": datetime.now(timezone.utc),
+            "lastHeartbeat": datetime.now(UTC),
         }
     )
 
@@ -212,7 +213,7 @@ async def leave_swarm(swarm_id: str, agent_id: str) -> dict[str, Any]:
         },
         data={
             "status": "RELEASED",
-            "releasedAt": datetime.now(timezone.utc),
+            "releasedAt": datetime.now(UTC),
         },
     )
 
@@ -322,7 +323,7 @@ async def acquire_claim(
 
     if existing:
         # Lazy expiration check
-        if existing.expiresAt and existing.expiresAt < datetime.now(timezone.utc):
+        if existing.expiresAt and existing.expiresAt < datetime.now(UTC):
             # Claim expired, mark it
             await db.resourceclaim.update(
                 where={"id": existing.id},
@@ -333,7 +334,7 @@ async def acquire_claim(
             # Claim is still active
             if existing.agentId == agent.id:
                 # Same agent, extend the claim
-                new_expires = datetime.now(timezone.utc) + timedelta(seconds=timeout_seconds)
+                new_expires = datetime.now(UTC) + timedelta(seconds=timeout_seconds)
                 await db.resourceclaim.update(
                     where={"id": existing.id},
                     data={"expiresAt": new_expires},
@@ -356,7 +357,7 @@ async def acquire_claim(
                 }
 
     # Create new claim
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=timeout_seconds)
+    expires_at = datetime.now(UTC) + timedelta(seconds=timeout_seconds)
 
     claim = await db.resourceclaim.create(
         data={
@@ -448,7 +449,7 @@ async def release_claim(
         where={"id": claim.id},
         data={
             "status": "RELEASED",
-            "releasedAt": datetime.now(timezone.utc),
+            "releasedAt": datetime.now(UTC),
         },
     )
 
@@ -496,7 +497,7 @@ async def check_claim(
         }
 
     # Lazy expiration
-    if claim.expiresAt and claim.expiresAt < datetime.now(timezone.utc):
+    if claim.expiresAt and claim.expiresAt < datetime.now(UTC):
         await db.resourceclaim.update(
             where={"id": claim.id},
             data={"status": "EXPIRED"},
@@ -785,15 +786,15 @@ async def claim_task(
             }
 
     # Claim the task
-    deadline = datetime.now(timezone.utc) + timedelta(seconds=timeout_seconds)
+    deadline = datetime.now(UTC) + timedelta(seconds=timeout_seconds)
 
     await db.swarmtask.update(
         where={"id": task.id},
         data={
             "status": "IN_PROGRESS",
             "agent": {"connect": {"id": agent.id}},  # Sets assignedTo via relation
-            "startedAt": datetime.now(timezone.utc),
-            "claimedAt": datetime.now(timezone.utc),
+            "startedAt": datetime.now(UTC),
+            "claimedAt": datetime.now(UTC),
         },
     )
 
@@ -876,7 +877,7 @@ async def complete_task(
     # Build update data - only include result if not None
     update_data: dict[str, Any] = {
         "status": status,
-        "completedAt": datetime.now(timezone.utc),
+        "completedAt": datetime.now(UTC),
     }
     if parsed_result is not None:
         update_data["result"] = Json(parsed_result)

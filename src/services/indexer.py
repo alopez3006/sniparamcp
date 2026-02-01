@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from .embeddings import EMBEDDING_DIMENSION, get_embeddings_service
+from .embeddings import get_embeddings_service
 
 if TYPE_CHECKING:
     from prisma import Prisma
@@ -151,7 +151,7 @@ class DocumentIndexer:
         # Time vector search query
         search_start = time.perf_counter()
         results = await self.db.query_raw(
-            f'''
+            '''
             SELECT
                 dc.id,
                 dc.content,

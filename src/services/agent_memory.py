@@ -7,7 +7,7 @@ and TTL with confidence decay over time.
 
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..db import get_db
@@ -40,14 +40,14 @@ def calculate_confidence_decay(
     Returns:
         Decayed confidence value (0-1)
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Use last access time if available, otherwise creation time
     reference_time = last_accessed_at or created_at
 
     # Ensure reference_time is timezone-aware (database may return naive datetimes)
     if reference_time.tzinfo is None:
-        reference_time = reference_time.replace(tzinfo=timezone.utc)
+        reference_time = reference_time.replace(tzinfo=UTC)
 
     days_since_reference = (now - reference_time).days
 
@@ -223,7 +223,7 @@ async def store_memory(
     # Calculate expiration
     expires_at = None
     if ttl_days:
-        expires_at = datetime.now(timezone.utc) + timedelta(days=ttl_days)
+        expires_at = datetime.now(UTC) + timedelta(days=ttl_days)
 
     # Map string types to enum values (Prisma expects uppercase)
     memory_type_upper = memory_type.upper()
@@ -316,7 +316,7 @@ async def semantic_recall(
     if not include_expired:
         where["OR"] = [
             {"expiresAt": None},
-            {"expiresAt": {"gt": datetime.now(timezone.utc)}},
+            {"expiresAt": {"gt": datetime.now(UTC)}},
         ]
 
     # Get all matching memories
@@ -433,7 +433,7 @@ async def semantic_recall(
         try:
             await db.agentmemory.update_many(
                 where={"id": {"in": result_ids}},
-                data={"lastAccessedAt": datetime.now(timezone.utc)},
+                data={"lastAccessedAt": datetime.now(UTC)},
             )
             # Note: update_many doesn't support increment, so we do a raw query
             # For now, skip accessCount increment to optimize latency
@@ -544,7 +544,7 @@ async def list_memories(
     if not include_expired:
         where["OR"] = [
             {"expiresAt": None},
-            {"expiresAt": {"gt": datetime.now(timezone.utc)}},
+            {"expiresAt": {"gt": datetime.now(UTC)}},
         ]
 
     # Count total
@@ -617,7 +617,7 @@ async def delete_memories(
     if category:
         where["category"] = category
     if older_than_days:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+        cutoff = datetime.now(UTC) - timedelta(days=older_than_days)
         where["createdAt"] = {"lt": cutoff}
 
     # Get IDs to delete embeddings

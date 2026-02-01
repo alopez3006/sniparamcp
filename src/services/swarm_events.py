@@ -6,14 +6,15 @@ Events are also persisted to the database for agents that poll.
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 try:
     from prisma import Json
 except ImportError:
     # Fallback for when Json isn't available (use identity function)
-    Json = lambda x: x
+    def Json(x):  # noqa: N802
+        return x
 
 from ..db import get_db
 from .cache import get_redis
@@ -82,7 +83,7 @@ async def broadcast_event(
         "agent_id": agent_id,
         "swarm_id": swarm_id,
         "payload": parsed_payload,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
 
     # 1. Persist to database
