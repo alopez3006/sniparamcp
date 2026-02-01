@@ -1231,14 +1231,13 @@ class RLMEngine:
         scored_sections = scored_sections[:max_sections]
 
         # ---- Relevance floor ----
-        # Drop sections below 80% of the top score (i.e. below 0.8 normalised
-        # relevance).  This prevents low-relevance padding that wastes budget
-        # without improving quality.  Keep at least 3 sections so narrow queries
-        # still return useful context.
-        min_keep = 3
+        # Drop sections below 65% of the top score.  This removes obvious noise
+        # while preserving moderately-relevant sections that broad queries need.
+        # Keep at least 5 sections so broad lookups still get enough context.
+        min_keep = 5
         if scored_sections:
             top_score = scored_sections[0][1]
-            relevance_floor = top_score * 0.80
+            relevance_floor = top_score * 0.65
             above_floor = [
                 (s, sc) for s, sc in scored_sections if sc >= relevance_floor
             ]
@@ -1259,14 +1258,15 @@ class RLMEngine:
         deduped: list[tuple[Section, float]] = []
         for section, score in scored_sections:
             tkey = _title_key(section.title)
-            # Two titles are "similar" if one is a subset of the other or
-            # they share >= 70 % of their words.
+            # Two titles are "similar" if they share >= 85 % of their words.
+            # Conservative threshold to avoid dropping sections with genuinely
+            # different content but similar names.
             duplicate = False
             for existing_key, existing_score in seen_title_keys.items():
                 if not tkey or not existing_key:
                     continue
                 overlap = len(tkey & existing_key) / min(len(tkey), len(existing_key))
-                if overlap >= 0.70:
+                if overlap >= 0.85:
                     duplicate = True
                     break
             if not duplicate:
