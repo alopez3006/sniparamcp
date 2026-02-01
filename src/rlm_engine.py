@@ -409,10 +409,16 @@ class RLMEngine:
             self._parse_sections(doc_lines, line_offset, doc.path)
 
     def _parse_sections(self, lines: list[str], offset: int, file_path: str) -> None:
-        """Parse markdown sections from lines."""
+        """Parse markdown sections from lines.
+
+        Orphan sections (headings with < 30 tokens of body content) are merged
+        into the previous section to avoid polluting the index with stubs that
+        waste context budget slots during retrieval.
+        """
         if self.index is None:
             return
 
+        _MIN_SECTION_TOKENS = 30  # Sections smaller than this get merged upward
         current_section: Section | None = None
         section_content: list[str] = []
         in_code_block = False
@@ -426,11 +432,19 @@ class RLMEngine:
             header_match = re.match(r"^(#{1,6})\s+(.+)$", line) if not in_code_block else None
 
             if header_match:
-                # Save previous section
+                # Save previous section (merge orphans into prior section)
                 if current_section:
                     current_section.content = "\n".join(section_content)
                     current_section.end_line = offset + i - 1
-                    self.index.sections.append(current_section)
+                    content_tokens = count_tokens(current_section.content)
+
+                    if content_tokens < _MIN_SECTION_TOKENS and self.index.sections:
+                        # Orphan heading — merge into previous section
+                        prev = self.index.sections[-1]
+                        prev.content += "\n\n" + current_section.content
+                        prev.end_line = current_section.end_line
+                    else:
+                        self.index.sections.append(current_section)
 
                 # Start new section
                 level = len(header_match.group(1))
@@ -449,11 +463,18 @@ class RLMEngine:
             elif current_section:
                 section_content.append(line)
 
-        # Save last section
+        # Save last section (also merge if orphan)
         if current_section:
             current_section.content = "\n".join(section_content)
             current_section.end_line = offset + len(lines)
-            self.index.sections.append(current_section)
+            content_tokens = count_tokens(current_section.content)
+
+            if content_tokens < _MIN_SECTION_TOKENS and self.index.sections:
+                prev = self.index.sections[-1]
+                prev.content += "\n\n" + current_section.content
+                prev.end_line = current_section.end_line
+            else:
+                self.index.sections.append(current_section)
 
     def _generate_section_id(self, title: str) -> str:
         """Generate a unique section ID from title."""
@@ -1205,6 +1226,20 @@ class RLMEngine:
         # Score and rank sections from local project
         scored_sections = await self._score_sections(query, search_mode)
 
+        # Filter out shallow sections (just headings with < 30 tokens of content).
+        # These waste context budget slots without contributing useful information.
+        _MIN_USEFUL_TOKENS = 30
+        scored_sections = [
+            (section, score)
+            for section, score in scored_sections
+            if count_tokens(section.content) >= _MIN_USEFUL_TOKENS
+        ]
+
+        # Cap results to top-N sections.  Returning too many dilutes signal-to-noise
+        # for the downstream LLM (e.g., 35 sections for a simple definition query).
+        _MAX_SECTIONS = 15
+        scored_sections = scored_sections[:_MAX_SECTIONS]
+
         # Greedy selection: add sections until budget is exceeded
         selected_sections: list[ContextSection] = []
         suggestions: list[str] = []
@@ -1761,7 +1796,10 @@ class RLMEngine:
             if matching:
                 term_sections[term] = matching
 
-        # Build sub-queries from terms with matching sections
+        # Build sub-queries from terms with matching sections.
+        # Use phrase-level queries (term + surrounding context from original query)
+        # instead of bare single-word terms to avoid catastrophic keyword ambiguity.
+        query_lower = query.lower()
         sub_queries: list[SubQuery] = []
         for i, (term, sections) in enumerate(term_sections.items(), start=1):
             # Estimate tokens based on section content
@@ -1769,9 +1807,13 @@ class RLMEngine:
                 min(count_tokens(s.content), 1500) for s in sections[:3]
             )
 
+            # Build a phrase-level sub-query: include neighbouring terms from
+            # the original query so the downstream search has enough context.
+            phrase = self._build_phrase_query(term, query_lower, unique_terms)
+
             sub_queries.append(SubQuery(
                 id=i,
-                query=term,
+                query=phrase,
                 priority=i,  # Earlier terms have higher priority
                 estimated_tokens=estimated_tokens,
                 key_terms=[term],
@@ -2109,6 +2151,34 @@ class RLMEngine:
         )
 
     # ============ HELPER METHODS FOR RECURSIVE CONTEXT ============
+
+    @staticmethod
+    def _build_phrase_query(
+        term: str, query_lower: str, all_terms: list[str]
+    ) -> str:
+        """Build a phrase-level sub-query from a term and its original context.
+
+        Instead of returning bare single-word terms like ``"prometheus"`` which
+        cause catastrophic keyword ambiguity, this returns phrases like
+        ``"prometheus monitoring metrics"`` by including neighbouring terms
+        from the original query.
+        """
+        # If the term is already a bigram+, use it directly
+        if " " in term:
+            return term
+
+        # Find neighbouring terms from the original query to add context
+        context_terms = [term]
+        for other in all_terms:
+            if other == term or other in term or term in other:
+                continue
+            # Include if the other term also appears in the original query
+            if other in query_lower:
+                context_terms.append(other)
+            if len(context_terms) >= 3:
+                break
+
+        return " ".join(context_terms)
 
     def _find_sections_for_term(self, term: str) -> list[Section]:
         """Find sections that match a search term."""
