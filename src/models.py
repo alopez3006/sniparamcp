@@ -58,6 +58,12 @@ class ToolName(str, Enum):
     RLM_SETTINGS = "rlm_settings"
     # Phase 11: Access Control Tools
     RLM_REQUEST_ACCESS = "rlm_request_access"
+    # Phase 12: RLM Orchestration Tools
+    RLM_LOAD_DOCUMENT = "rlm_load_document"
+    RLM_LOAD_PROJECT = "rlm_load_project"
+    RLM_ORCHESTRATE = "rlm_orchestrate"
+    # Phase 13: REPL Context Bridge
+    RLM_REPL_CONTEXT = "rlm_repl_context"
 
 
 class SearchMode(str, Enum):
@@ -137,6 +143,7 @@ class ContextQueryParams(BaseModel):
         description="Prefer stored summaries over full document content when available",
     )
 
+
 class MultiProjectQueryParams(BaseModel):
     """Parameters for rlm_multi_project_query tool."""
 
@@ -173,7 +180,6 @@ class MultiProjectQueryParams(BaseModel):
         default=False,
         description="Prefer stored summaries when available",
     )
-
 
 
 # ============ RESPONSE MODELS ============
@@ -261,9 +267,7 @@ class ContextSection(BaseModel):
     content: str = Field(..., description="Section content (may be truncated)")
     file: str = Field(..., description="Source file path")
     lines: tuple[int, int] = Field(..., description="Start and end line numbers")
-    relevance_score: float = Field(
-        ..., ge=0.0, le=1.0, description="Relevance score (0-1)"
-    )
+    relevance_score: float = Field(..., ge=0.0, le=1.0, description="Relevance score (0-1)")
     token_count: int = Field(..., ge=0, description="Token count for this section")
     truncated: bool = Field(
         default=False, description="Whether content was truncated to fit budget"
@@ -342,9 +346,7 @@ class DecomposeParams(BaseModel):
     """Parameters for rlm_decompose tool."""
 
     query: str = Field(..., description="The complex question to decompose")
-    max_depth: int = Field(
-        default=2, ge=1, le=5, description="Maximum recursion depth"
-    )
+    max_depth: int = Field(default=2, ge=1, le=5, description="Maximum recursion depth")
     strategy: DecomposeStrategy = Field(
         default=DecomposeStrategy.AUTO, description="Decomposition strategy"
     )
@@ -359,24 +361,16 @@ class SubQuery(BaseModel):
 
     id: int = Field(..., description="Sub-query ID (1-indexed)")
     query: str = Field(..., description="The sub-query text")
-    priority: int = Field(
-        default=1, ge=1, le=10, description="Priority (1=highest)"
-    )
-    estimated_tokens: int = Field(
-        default=1000, ge=0, description="Estimated tokens for this query"
-    )
-    key_terms: list[str] = Field(
-        default_factory=list, description="Key terms identified"
-    )
+    priority: int = Field(default=1, ge=1, le=10, description="Priority (1=highest)")
+    estimated_tokens: int = Field(default=1000, ge=0, description="Estimated tokens for this query")
+    key_terms: list[str] = Field(default_factory=list, description="Key terms identified")
 
 
 class DecomposeResult(BaseModel):
     """Result of rlm_decompose tool."""
 
     original_query: str = Field(..., description="The original query")
-    sub_queries: list[SubQuery] = Field(
-        default_factory=list, description="Generated sub-queries"
-    )
+    sub_queries: list[SubQuery] = Field(default_factory=list, description="Generated sub-queries")
     dependencies: list[tuple[int, int]] = Field(
         default_factory=list,
         description="Dependencies between sub-queries [(a, b) means a should be read before b]",
@@ -387,18 +381,14 @@ class DecomposeResult(BaseModel):
     total_estimated_tokens: int = Field(
         default=0, ge=0, description="Total estimated tokens for all sub-queries"
     )
-    strategy_used: DecomposeStrategy = Field(
-        ..., description="Strategy that was used"
-    )
+    strategy_used: DecomposeStrategy = Field(..., description="Strategy that was used")
 
 
 class MultiQueryItem(BaseModel):
     """A single query in a multi-query batch."""
 
     query: str = Field(..., description="The query text")
-    max_tokens: int | None = Field(
-        default=None, description="Optional per-query token budget"
-    )
+    max_tokens: int | None = Field(default=None, description="Optional per-query token budget")
 
 
 class MultiQueryParams(BaseModel):
@@ -407,9 +397,7 @@ class MultiQueryParams(BaseModel):
     queries: list[MultiQueryItem] = Field(
         ..., min_length=1, max_length=10, description="List of queries to execute"
     )
-    max_tokens: int = Field(
-        default=8000, ge=500, le=50000, description="Total token budget"
-    )
+    max_tokens: int = Field(default=8000, ge=500, le=50000, description="Total token budget")
     search_mode: SearchMode = Field(
         default=SearchMode.HYBRID, description="Search mode for all queries"
     )
@@ -419,9 +407,7 @@ class MultiQueryResultItem(BaseModel):
     """Result for a single query in a multi-query batch."""
 
     query: str = Field(..., description="The original query")
-    sections: list[ContextSection] = Field(
-        default_factory=list, description="Relevant sections"
-    )
+    sections: list[ContextSection] = Field(default_factory=list, description="Relevant sections")
     tokens_used: int = Field(default=0, ge=0, description="Tokens used for this query")
     success: bool = Field(default=True, description="Whether query succeeded")
     error: str | None = Field(default=None, description="Error message if failed")
@@ -435,9 +421,7 @@ class MultiQueryResult(BaseModel):
     )
     total_tokens: int = Field(default=0, ge=0, description="Total tokens used")
     queries_executed: int = Field(default=0, ge=0, description="Number of queries executed")
-    queries_skipped: int = Field(
-        default=0, ge=0, description="Queries skipped due to budget"
-    )
+    queries_skipped: int = Field(default=0, ge=0, description="Queries skipped due to budget")
     search_mode: SearchMode = Field(..., description="Search mode used")
 
 
@@ -445,18 +429,10 @@ class PlanStep(BaseModel):
     """A step in an execution plan."""
 
     step: int = Field(..., ge=1, description="Step number")
-    action: str = Field(
-        ..., description="Action to perform: decompose, context_query, multi_query"
-    )
-    params: dict[str, Any] = Field(
-        default_factory=dict, description="Parameters for the action"
-    )
-    depends_on: list[int] = Field(
-        default_factory=list, description="Steps this step depends on"
-    )
-    expected_output: str = Field(
-        default="sections", description="Expected output type"
-    )
+    action: str = Field(..., description="Action to perform: decompose, context_query, multi_query")
+    params: dict[str, Any] = Field(default_factory=dict, description="Parameters for the action")
+    depends_on: list[int] = Field(default_factory=list, description="Steps this step depends on")
+    expected_output: str = Field(default="sections", description="Expected output type")
 
 
 class PlanParams(BaseModel):
@@ -466,9 +442,7 @@ class PlanParams(BaseModel):
     strategy: PlanStrategy = Field(
         default=PlanStrategy.RELEVANCE_FIRST, description="Execution strategy"
     )
-    max_tokens: int = Field(
-        default=16000, ge=1000, le=100000, description="Total token budget"
-    )
+    max_tokens: int = Field(default=16000, ge=1000, le=100000, description="Total token budget")
 
 
 class PlanResult(BaseModel):
@@ -477,13 +451,9 @@ class PlanResult(BaseModel):
     plan_id: str = Field(..., description="Unique plan identifier")
     query: str = Field(..., description="The original query")
     steps: list[PlanStep] = Field(default_factory=list, description="Execution steps")
-    estimated_total_tokens: int = Field(
-        default=0, ge=0, description="Estimated total tokens"
-    )
+    estimated_total_tokens: int = Field(default=0, ge=0, description="Estimated total tokens")
     strategy: PlanStrategy = Field(..., description="Strategy used")
-    estimated_queries: int = Field(
-        default=0, ge=0, description="Estimated number of queries"
-    )
+    estimated_queries: int = Field(default=0, ge=0, description="Estimated number of queries")
 
 
 # ============ SUMMARY STORAGE MODELS (Phase 4.6) ============
@@ -502,22 +472,14 @@ class SummaryType(str, Enum):
 class StoreSummaryParams(BaseModel):
     """Parameters for rlm_store_summary tool."""
 
-    document_path: str = Field(
-        ..., description="Path to the document (relative to project root)"
-    )
+    document_path: str = Field(..., description="Path to the document (relative to project root)")
     summary: str = Field(..., min_length=1, description="The summary text to store")
-    summary_type: SummaryType = Field(
-        default=SummaryType.CONCISE, description="Type of summary"
-    )
+    summary_type: SummaryType = Field(default=SummaryType.CONCISE, description="Type of summary")
     section_id: str | None = Field(
         default=None, description="Optional section identifier for partial summaries"
     )
-    line_start: int | None = Field(
-        default=None, ge=1, description="Start line for section summary"
-    )
-    line_end: int | None = Field(
-        default=None, ge=1, description="End line for section summary"
-    )
+    line_start: int | None = Field(default=None, ge=1, description="Start line for section summary")
+    line_end: int | None = Field(default=None, ge=1, description="End line for section summary")
     generated_by: str | None = Field(
         default=None,
         description="Model that generated the summary (e.g., 'claude-3.5-sonnet')",
@@ -531,25 +493,17 @@ class StoreSummaryResult(BaseModel):
     document_path: str = Field(..., description="Document path")
     summary_type: SummaryType = Field(..., description="Type of summary stored")
     token_count: int = Field(..., ge=0, description="Token count of the summary")
-    created: bool = Field(
-        default=True, description="True if new, False if updated existing"
-    )
+    created: bool = Field(default=True, description="True if new, False if updated existing")
     message: str = Field(..., description="Human-readable status message")
 
 
 class GetSummariesParams(BaseModel):
     """Parameters for rlm_get_summaries tool."""
 
-    document_path: str | None = Field(
-        default=None, description="Filter by document path"
-    )
-    summary_type: SummaryType | None = Field(
-        default=None, description="Filter by summary type"
-    )
+    document_path: str | None = Field(default=None, description="Filter by document path")
+    summary_type: SummaryType | None = Field(default=None, description="Filter by summary type")
     section_id: str | None = Field(default=None, description="Filter by section ID")
-    include_content: bool = Field(
-        default=True, description="Include summary content in response"
-    )
+    include_content: bool = Field(default=True, description="Include summary content in response")
 
 
 class SummaryInfo(BaseModel):
@@ -577,18 +531,14 @@ class GetSummariesResult(BaseModel):
         default_factory=list, description="List of summaries matching filters"
     )
     total_count: int = Field(default=0, ge=0, description="Total number of summaries")
-    total_tokens: int = Field(
-        default=0, ge=0, description="Total tokens across all summaries"
-    )
+    total_tokens: int = Field(default=0, ge=0, description="Total tokens across all summaries")
 
 
 class DeleteSummaryParams(BaseModel):
     """Parameters for rlm_delete_summary tool."""
 
     summary_id: str | None = Field(default=None, description="Specific summary ID")
-    document_path: str | None = Field(
-        default=None, description="Delete all summaries for document"
-    )
+    document_path: str | None = Field(default=None, description="Delete all summaries for document")
     summary_type: SummaryType | None = Field(
         default=None, description="Delete summaries of this type"
     )
@@ -655,9 +605,7 @@ class SharedContextResult(BaseModel):
         description="Merged content string (if include_content=True)",
     )
     total_tokens: int = Field(default=0, ge=0, description="Total tokens returned")
-    collections_loaded: int = Field(
-        default=0, ge=0, description="Number of collections loaded"
-    )
+    collections_loaded: int = Field(default=0, ge=0, description="Number of collections loaded")
     context_hash: str = Field(
         default="",
         description="Hash for cache invalidation",
@@ -672,9 +620,7 @@ class PromptTemplateInfo(BaseModel):
     slug: str = Field(..., description="Template slug")
     description: str | None = Field(default=None, description="Template description")
     prompt: str = Field(..., description="The prompt template text")
-    variables: list[str] = Field(
-        default_factory=list, description="Variables in the template"
-    )
+    variables: list[str] = Field(default_factory=list, description="Variables in the template")
     category: str = Field(..., description="Template category")
     collection_name: str = Field(..., description="Source collection name")
 
@@ -692,9 +638,7 @@ class ListTemplatesResult(BaseModel):
         default_factory=list, description="Available prompt templates"
     )
     total_count: int = Field(default=0, ge=0, description="Total templates found")
-    categories: list[str] = Field(
-        default_factory=list, description="Available categories"
-    )
+    categories: list[str] = Field(default_factory=list, description="Available categories")
 
 
 class GetTemplateParams(BaseModel):
@@ -711,9 +655,7 @@ class GetTemplateParams(BaseModel):
 class GetTemplateResult(BaseModel):
     """Result of rlm_get_template tool."""
 
-    template: PromptTemplateInfo | None = Field(
-        default=None, description="The template info"
-    )
+    template: PromptTemplateInfo | None = Field(default=None, description="The template info")
     rendered_prompt: str | None = Field(
         default=None, description="Prompt with variables substituted"
     )
@@ -749,9 +691,7 @@ class RememberParams(BaseModel):
     """Parameters for rlm_remember tool."""
 
     content: str = Field(..., min_length=1, description="The memory content to store")
-    type: AgentMemoryType = Field(
-        default=AgentMemoryType.FACT, description="Type of memory"
-    )
+    type: AgentMemoryType = Field(default=AgentMemoryType.FACT, description="Type of memory")
     scope: AgentMemoryScope = Field(
         default=AgentMemoryScope.PROJECT, description="Visibility scope"
     )
@@ -759,12 +699,8 @@ class RememberParams(BaseModel):
     ttl_days: int | None = Field(
         default=None, ge=1, le=365, description="Days until memory expires (null = permanent)"
     )
-    related_to: list[str] = Field(
-        default_factory=list, description="IDs of related memories"
-    )
-    document_refs: list[str] = Field(
-        default_factory=list, description="Referenced document paths"
-    )
+    related_to: list[str] = Field(default_factory=list, description="IDs of related memories")
+    document_refs: list[str] = Field(default_factory=list, description="Referenced document paths")
     source: str | None = Field(
         default=None, description="What created this memory (e.g., 'user', 'agent', 'import')"
     )
@@ -794,9 +730,7 @@ class RecallParams(BaseModel):
     min_relevance: float = Field(
         default=0.5, ge=0.0, le=1.0, description="Minimum relevance score (0-1)"
     )
-    include_expired: bool = Field(
-        default=False, description="Include expired memories in recall"
-    )
+    include_expired: bool = Field(default=False, description="Include expired memories in recall")
 
 
 class RecalledMemory(BaseModel):
@@ -855,9 +789,7 @@ class MemoryInfo(BaseModel):
 class MemoriesResult(BaseModel):
     """Result of rlm_memories tool."""
 
-    memories: list[MemoryInfo] = Field(
-        default_factory=list, description="List of memories"
-    )
+    memories: list[MemoryInfo] = Field(default_factory=list, description="List of memories")
     total_count: int = Field(default=0, ge=0, description="Total matching memories")
     has_more: bool = Field(default=False, description="More results available")
 
@@ -869,9 +801,7 @@ class ForgetParams(BaseModel):
     type: AgentMemoryType | None = Field(
         default=None, description="Delete all memories of this type"
     )
-    category: str | None = Field(
-        default=None, description="Delete all memories in this category"
-    )
+    category: str | None = Field(default=None, description="Delete all memories in this category")
     older_than_days: int | None = Field(
         default=None, ge=1, description="Delete memories older than N days"
     )
@@ -893,9 +823,7 @@ class SwarmCreateParams(BaseModel):
     name: str = Field(..., min_length=1, max_length=100, description="Swarm name")
     description: str | None = Field(default=None, description="Swarm description")
     max_agents: int = Field(default=10, ge=2, le=50, description="Maximum agents allowed")
-    task_timeout: int = Field(
-        default=300, ge=60, le=3600, description="Task timeout in seconds"
-    )
+    task_timeout: int = Field(default=300, ge=60, le=3600, description="Task timeout in seconds")
     claim_timeout: int = Field(
         default=600, ge=60, le=7200, description="Resource claim timeout in seconds"
     )
@@ -1080,7 +1008,9 @@ class TaskClaimParams(BaseModel):
 class TaskClaimResult(BaseModel):
     """Result of rlm_task_claim tool."""
 
-    task_id: str | None = Field(default=None, description="Claimed task ID (null if none available)")
+    task_id: str | None = Field(
+        default=None, description="Claimed task ID (null if none available)"
+    )
     swarm_id: str = Field(..., description="Swarm ID")
     agent_id: str = Field(..., description="Agent ID")
     title: str | None = Field(default=None, description="Task title")
@@ -1139,9 +1069,7 @@ class SyncDocumentsParams(BaseModel):
     documents: list[SyncDocumentItem] = Field(
         ..., description="Documents to sync", min_length=1, max_length=100
     )
-    delete_missing: bool = Field(
-        default=False, description="Delete documents not in list"
-    )
+    delete_missing: bool = Field(default=False, description="Delete documents not in list")
 
 
 class SyncDocumentsResult(BaseModel):
