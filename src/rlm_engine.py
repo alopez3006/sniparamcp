@@ -91,27 +91,56 @@ from .services.swarm_events import (
 # When keyword ranking has high confidence (exact title match, specific terms),
 # boost keyword weight to prevent semantic noise from diluting precise results.
 # When query is conceptual (how/why/explain), boost semantic weight.
-_HYBRID_KEYWORD_HEAVY = (0.70, 0.30)   # factual / title-match queries
-_HYBRID_BALANCED = (0.50, 0.50)         # default
-_HYBRID_SEMANTIC_HEAVY = (0.30, 0.70)   # conceptual / how-why queries
+_HYBRID_KEYWORD_HEAVY = (0.70, 0.30)  # factual / title-match queries
+_HYBRID_BALANCED = (0.50, 0.50)  # default
+_HYBRID_SEMANTIC_HEAVY = (0.30, 0.70)  # conceptual / how-why queries
 
 # Reciprocal Rank Fusion constant (k=60 is the standard from Cormack+ 2009).
 # Higher k reduces the influence of top-ranked outliers.
 _RRF_K = 60
 
 # Query terms that signal structured/factual content (keyword-friendly)
-_SPECIFIC_QUERY_TERMS = frozenset({
-    "pricing", "price", "cost", "tier", "plan", "stack", "version",
-    "model", "schema", "table", "endpoint", "api", "command", "config",
-    "database", "deploy", "deployment", "auth", "authentication",
-})
+_SPECIFIC_QUERY_TERMS = frozenset(
+    {
+        "pricing",
+        "price",
+        "cost",
+        "tier",
+        "plan",
+        "stack",
+        "version",
+        "model",
+        "schema",
+        "table",
+        "endpoint",
+        "api",
+        "command",
+        "config",
+        "database",
+        "deploy",
+        "deployment",
+        "auth",
+        "authentication",
+    }
+)
 
 # Conceptual query prefixes (semantic-friendly)
 _CONCEPTUAL_PREFIXES = (
-    "how does", "how do", "how is", "how are", "how can",
-    "why does", "why do", "why is", "why are",
-    "explain", "describe", "compare", "what happens when",
-    "what is the difference", "what are the tradeoffs",
+    "how does",
+    "how do",
+    "how is",
+    "how are",
+    "how can",
+    "why does",
+    "why do",
+    "why is",
+    "why are",
+    "explain",
+    "describe",
+    "compare",
+    "what happens when",
+    "what is the difference",
+    "what are the tradeoffs",
 )
 
 # Plans that have access to semantic search features
@@ -131,6 +160,15 @@ SUMMARY_STORAGE_PLANS = {Plan.PRO, Plan.TEAM, Plan.ENTERPRISE}
 
 # Plans that have access to shared context features
 SHARED_CONTEXT_PLANS = {Plan.PRO, Plan.TEAM, Plan.ENTERPRISE}
+
+# Plans that have access to raw document loading (rlm_load_document)
+RAW_DOCUMENT_PLANS = {Plan.PRO, Plan.TEAM, Plan.ENTERPRISE}
+
+# Plans that have access to REPL context bridge (rlm_repl_context)
+REPL_CONTEXT_PLANS = {Plan.PRO, Plan.TEAM, Plan.ENTERPRISE}
+
+# Plans that have access to orchestration features (rlm_load_project, rlm_orchestrate)
+ORCHESTRATION_PLANS = {Plan.TEAM, Plan.ENTERPRISE}
 
 # Tool access level categories for per-project access control
 # READ_TOOLS: Available to VIEWER and above
@@ -154,6 +192,12 @@ READ_TOOLS = {
     ToolName.RLM_STATE_GET,
     ToolName.RLM_TASK_CLAIM,
     ToolName.RLM_SETTINGS,
+    # Phase 12: RLM Orchestration Tools
+    ToolName.RLM_LOAD_DOCUMENT,
+    ToolName.RLM_LOAD_PROJECT,
+    ToolName.RLM_ORCHESTRATE,
+    # Phase 13: REPL Context Bridge
+    ToolName.RLM_REPL_CONTEXT,
 }
 
 # WRITE_TOOLS: Available to EDITOR and above
@@ -254,14 +298,17 @@ def get_first_query_tips(plan: "Plan") -> str:
         tips.append("- `rlm_multi_query` - Batch multiple queries in parallel")
         tips.append("- `rlm_decompose` - Break complex queries into sub-queries")
         tips.append("- `rlm_shared_context` - Get team coding standards/best practices")
+        tips.append("- `rlm_load_document` - Load raw document content by file path")
         tips.append("")
 
-    # Team+ tools - multi-project, plan, templates
+    # Team+ tools - multi-project, plan, templates, orchestration
     if plan in PLAN_FEATURE_PLANS:
         tips.append("**Team Tools (Team+):**")
         tips.append("- `rlm_multi_project_query` - Search across ALL your projects")
         tips.append("- `rlm_plan` - Generate execution plan for complex questions")
         tips.append("- `rlm_list_templates` / `rlm_get_template` - Use prompt templates")
+        tips.append("- `rlm_load_project` - Load full project structure with content")
+        tips.append("- `rlm_orchestrate` - Multi-round context exploration (search + raw load)")
         tips.append("")
 
     # Utility tools - available to all
@@ -275,6 +322,7 @@ def get_first_query_tips(plan: "Plan") -> str:
     tips.append("---")
 
     return "\n".join(tips)
+
 
 logger = logging.getLogger(__name__)
 
@@ -315,6 +363,8 @@ class DocumentationIndex:
     lines: list[str] = field(default_factory=list)
     sections: list[Section] = field(default_factory=list)
     total_chars: int = 0
+    # File boundary tracking: maps file path → (start_line_0indexed, end_line_0indexed_exclusive)
+    file_boundaries: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 
 @dataclass
@@ -398,6 +448,9 @@ class RLMEngine:
             line_offset = len(self.index.lines)
             self.index.lines.extend(doc_lines)
             self.index.total_chars += len(doc.content)
+
+            # Track file boundaries for rlm_load_document
+            self.index.file_boundaries[doc.path] = (line_offset, line_offset + len(doc_lines))
 
             # Parse sections from this document
             self._parse_sections(doc_lines, line_offset, doc.path)
@@ -507,12 +560,12 @@ class RLMEngine:
         db = await get_db()
         try:
             count = await db.query_raw(
-                '''
+                """
                 SELECT COUNT(*) as count FROM document_chunks dc
                 JOIN documents d ON dc."documentId" = d.id
                 WHERE d."projectId" = $1
                 LIMIT 1
-                ''',
+                """,
                 self.project_id,
             )
             self._chunks_available = count[0]["count"] > 0 if count else False
@@ -642,6 +695,12 @@ class RLMEngine:
             ToolName.RLM_SETTINGS: self._handle_settings,
             # Phase 11: Access Control Tools
             ToolName.RLM_REQUEST_ACCESS: self._handle_request_access,
+            # Phase 12: RLM Orchestration Tools
+            ToolName.RLM_LOAD_DOCUMENT: self._handle_load_document,
+            ToolName.RLM_LOAD_PROJECT: self._handle_load_project,
+            ToolName.RLM_ORCHESTRATE: self._handle_orchestrate,
+            # Phase 13: REPL Context Bridge
+            ToolName.RLM_REPL_CONTEXT: self._handle_repl_context,
         }
 
         handler = handlers.get(tool)
@@ -798,9 +857,15 @@ class RLMEngine:
                 response_parts.append(f"**Session Context:**\n{self.session_context}\n")
 
             for section, score in top_sections:
-                response_parts.append(f"\n## {section.title} (lines {section.start_line}-{section.end_line})")
+                response_parts.append(
+                    f"\n## {section.title} (lines {section.start_line}-{section.end_line})"
+                )
                 # Truncate content if too long
-                content = section.content[:2000] + "..." if len(section.content) > 2000 else section.content
+                content = (
+                    section.content[:2000] + "..."
+                    if len(section.content) > 2000
+                    else section.content
+                )
                 response_parts.append(content)
 
             response = "\n".join(response_parts)
@@ -863,10 +928,12 @@ class RLMEngine:
                 search_line = line[:10000] if len(line) > 10000 else line
                 try:
                     if regex.search(search_line):
-                        results.append({
-                            "line_number": i,
-                            "content": line.strip()[:500],  # Limit content length in results
-                        })
+                        results.append(
+                            {
+                                "line_number": i,
+                                "content": line.strip()[:500],  # Limit content length in results
+                            }
+                        )
                         if len(results) >= max_results:
                             break
                 except Exception:
@@ -952,9 +1019,7 @@ class RLMEngine:
         self.session_context = ""
 
         # Clear from database
-        await db.sessioncontext.delete_many(
-            where={"projectId": self.project_id}
-        )
+        await db.sessioncontext.delete_many(where={"projectId": self.project_id})
 
         return ToolResult(data="Session context cleared.", input_tokens=0, output_tokens=5)
 
@@ -1165,9 +1230,7 @@ class RLMEngine:
                     # some relevance to the query. MANDATORY docs always included.
                     # Uses title + first 200 chars (intro) to avoid false positives
                     # from large docs that mention common keywords in code examples.
-                    query_keywords = {
-                        w for w in re.findall(r"\w+", query.lower()) if len(w) >= 3
-                    }
+                    query_keywords = {w for w in re.findall(r"\w+", query.lower()) if len(w) >= 3}
 
                     # Convert shared documents to ContextSection format
                     for doc in allocated_docs:
@@ -1178,9 +1241,7 @@ class RLMEngine:
 
                         # MANDATORY docs always included; others need query relevance
                         if cat_enum != DocumentCategoryEnum.MANDATORY and query_keywords:
-                            check_text = (
-                                doc.title.lower() + " " + doc.content[:200].lower()
-                            )
+                            check_text = doc.title.lower() + " " + doc.content[:200].lower()
                             hits = sum(1 for kw in query_keywords if kw in check_text)
                             relevance = hits / len(query_keywords) if query_keywords else 0
                             if relevance < 0.15:
@@ -1225,37 +1286,85 @@ class RLMEngine:
             if count_tokens(section.content) >= min_useful_tokens
         ]
 
+        # ---- Query specificity filter ----
+        # Broad queries (e.g. "architecture") match many sections.  Compute
+        # a simple document-frequency ratio: matched / total.  When > 40 %
+        # of sections match, raise the score threshold to keep only the
+        # highest-signal results instead of flooding the context budget.
+        total_sections = len(self.index.sections) if self.index else 1
+        match_ratio = len(scored_sections) / max(total_sections, 1)
+        if match_ratio > 0.40 and scored_sections:
+            # Broad query detected — keep only top 30 % of scored sections
+            # by raising the minimum score to the 70th-percentile score.
+            cutoff_idx = max(1, int(len(scored_sections) * 0.30))
+            cutoff_score = scored_sections[cutoff_idx - 1][1] if cutoff_idx <= len(scored_sections) else 0
+            before_count = len(scored_sections)
+            scored_sections = [
+                (s, sc) for s, sc in scored_sections if sc >= cutoff_score
+            ]
+            logger.info(
+                f"Broad query filter: {match_ratio:.0%} sections matched, "
+                f"trimmed {before_count} → {len(scored_sections)} "
+                f"(cutoff_score={cutoff_score:.1f})"
+            )
+
         # Cap results to top-N sections.  Returning too many dilutes signal-to-noise
         # for the downstream LLM (e.g., 35 sections for a simple definition query).
         max_sections = 15
         scored_sections = scored_sections[:max_sections]
 
-        # ---- Title-similarity dedup ----
-        # Sections with near-identical titles (e.g. "MCP Server Issues" and
-        # "MCP Server (`apps/mcp-server/`)") dilute context.  Keep only the
-        # highest-scoring section per title-word cluster.
+        # ---- Title + content dedup ----
+        # Two-pass deduplication:
+        # 1. Title-word overlap (fast, catches near-identical headings)
+        # 2. Content-word overlap (catches sections with different titles
+        #    but substantially overlapping body text — common for broad
+        #    queries like "architecture" where subsections repeat parent
+        #    content)
         def _title_key(title: str) -> frozenset[str]:
             """Normalise a section title to a bag of lowercase alpha words."""
             return frozenset(re.findall(r"[a-z]+", title.lower()))
 
+        def _content_shingle(content: str) -> frozenset[str]:
+            """Extract a word-set 'fingerprint' from the first 500 chars."""
+            words = re.findall(r"[a-z]{3,}", content[:500].lower())
+            return frozenset(words)
+
         seen_title_keys: dict[frozenset[str], float] = {}
+        seen_content_keys: list[frozenset[str]] = []
         deduped: list[tuple[Section, float]] = []
         for section, score in scored_sections:
             tkey = _title_key(section.title)
-            # Two titles are "similar" if they share >= 85 % of their words.
-            # Conservative threshold to avoid dropping sections with genuinely
-            # different content but similar names.
-            duplicate = False
-            for existing_key, existing_score in seen_title_keys.items():
+            # Pass 1: title similarity (>= 85 % word overlap)
+            title_dup = False
+            for existing_key in seen_title_keys:
                 if not tkey or not existing_key:
                     continue
                 overlap = len(tkey & existing_key) / min(len(tkey), len(existing_key))
                 if overlap >= 0.85:
-                    duplicate = True
+                    title_dup = True
                     break
-            if not duplicate:
+
+            # Pass 2: content similarity (>= 60 % word overlap)
+            content_dup = False
+            if not title_dup:
+                ckey = _content_shingle(section.content)
+                if ckey and len(ckey) >= 5:  # Only check substantial sections
+                    for existing_ckey in seen_content_keys:
+                        if not existing_ckey:
+                            continue
+                        c_overlap = len(ckey & existing_ckey) / min(len(ckey), len(existing_ckey))
+                        if c_overlap >= 0.60:
+                            content_dup = True
+                            logger.debug(
+                                f"Content dedup: '{section.title}' overlaps "
+                                f"with existing section ({c_overlap:.0%})"
+                            )
+                            break
+
+            if not title_dup and not content_dup:
                 deduped.append((section, score))
                 seen_title_keys[tkey] = score
+                seen_content_keys.append(_content_shingle(section.content))
         scored_sections = deduped
 
         # Greedy selection: add sections until budget is exceeded
@@ -1331,6 +1440,20 @@ class RLMEngine:
                 # No more budget - add to suggestions
                 if len(suggestions) < 5:
                     suggestions.append(f"{section.title} (score: {score:.1f})")
+
+        # ---- Hard cap: enforce max_tokens guarantee ----
+        # The greedy loop above *should* stay within budget, but shared
+        # context allocation, session context, and rounding during truncation
+        # can push total_tokens slightly over.  Drop the lowest-scoring local
+        # sections until we're within budget.
+        if total_tokens > max_tokens and selected_sections:
+            logger.warning(
+                f"Token budget exceeded ({total_tokens}/{max_tokens}), "
+                f"trimming lowest-scoring local sections"
+            )
+            while total_tokens > max_tokens and selected_sections:
+                removed = selected_sections.pop()
+                total_tokens -= removed.token_count
 
         # Build result - shared context sections come FIRST
         all_sections = shared_context_sections + selected_sections
@@ -1428,10 +1551,14 @@ class RLMEngine:
 
             if use_chunks:
                 semantic_scores = await self._calculate_semantic_scores_from_chunks(query)
-                logger.info(f"Using pre-computed chunks for semantic search (project: {self.project_id})")
+                logger.info(
+                    f"Using pre-computed chunks for semantic search (project: {self.project_id})"
+                )
             else:
                 semantic_scores = self._calculate_semantic_scores(query)
-                logger.info(f"Using on-the-fly embedding (no chunks for project: {self.project_id})")
+                logger.info(
+                    f"Using on-the-fly embedding (no chunks for project: {self.project_id})"
+                )
 
             for section in self.index.sections:
                 score = semantic_scores.get(section.id, 0.0) * 100  # Scale to 0-100
@@ -1445,10 +1572,14 @@ class RLMEngine:
 
             if use_chunks:
                 semantic_scores = await self._calculate_semantic_scores_from_chunks(query)
-                logger.info(f"Using pre-computed chunks for hybrid search (project: {self.project_id})")
+                logger.info(
+                    f"Using pre-computed chunks for hybrid search (project: {self.project_id})"
+                )
             else:
                 semantic_scores = self._calculate_semantic_scores(query)
-                logger.info(f"Using on-the-fly embedding for hybrid search (project: {self.project_id})")
+                logger.info(
+                    f"Using on-the-fly embedding for hybrid search (project: {self.project_id})"
+                )
 
             # Adaptive weights: classify query to pick keyword/semantic balance
             kw_weight, sem_weight = self._classify_query_weights(query, keyword_scores)
@@ -1517,9 +1648,7 @@ class RLMEngine:
             section_embeddings = embeddings_service.embed_texts(section_texts)
 
             # Calculate similarities
-            similarities = embeddings_service.cosine_similarity(
-                query_embedding, section_embeddings
-            )
+            similarities = embeddings_service.cosine_similarity(query_embedding, section_embeddings)
 
             # Map to section IDs
             return {
@@ -1584,7 +1713,9 @@ class RLMEngine:
     # ------------------------------------------------------------------
 
     def _classify_query_weights(
-        self, query: str, keyword_scores: dict[str, float],
+        self,
+        query: str,
+        keyword_scores: dict[str, float],
     ) -> tuple[float, float]:
         """Return (keyword_weight, semantic_weight) adapted to the query.
 
@@ -1650,21 +1781,19 @@ class RLMEngine:
         # Build keyword ranking (descending score)
         kw_ranked = sorted(
             ((sid, sc) for sid, sc in keyword_scores.items() if sc > 0),
-            key=lambda x: x[1], reverse=True,
+            key=lambda x: x[1],
+            reverse=True,
         )
-        kw_rank: dict[str, int] = {
-            sid: rank for rank, (sid, _) in enumerate(kw_ranked, start=1)
-        }
+        kw_rank: dict[str, int] = {sid: rank for rank, (sid, _) in enumerate(kw_ranked, start=1)}
         default_kw_rank = len(kw_ranked) + 1
 
         # Build semantic ranking (descending similarity)
         sem_ranked = sorted(
             ((sid, sc) for sid, sc in semantic_scores.items() if sc > 0),
-            key=lambda x: x[1], reverse=True,
+            key=lambda x: x[1],
+            reverse=True,
         )
-        sem_rank: dict[str, int] = {
-            sid: rank for rank, (sid, _) in enumerate(sem_ranked, start=1)
-        }
+        sem_rank: dict[str, int] = {sid: rank for rank, (sid, _) in enumerate(sem_ranked, start=1)}
         default_sem_rank = len(sem_ranked) + 1
 
         # Union of all section IDs present in either ranking
@@ -1820,29 +1949,27 @@ class RLMEngine:
         sub_queries: list[SubQuery] = []
         for i, (term, sections) in enumerate(term_sections.items(), start=1):
             # Estimate tokens based on section content
-            estimated_tokens = sum(
-                min(count_tokens(s.content), 1500) for s in sections[:3]
-            )
+            estimated_tokens = sum(min(count_tokens(s.content), 1500) for s in sections[:3])
 
             # Build a phrase-level sub-query: include neighbouring terms from
             # the original query so the downstream search has enough context.
             phrase = self._build_phrase_query(term, query_lower, unique_terms)
 
-            sub_queries.append(SubQuery(
-                id=i,
-                query=phrase,
-                priority=i,  # Earlier terms have higher priority
-                estimated_tokens=estimated_tokens,
-                key_terms=[term],
-            ))
+            sub_queries.append(
+                SubQuery(
+                    id=i,
+                    query=phrase,
+                    priority=i,  # Earlier terms have higher priority
+                    estimated_tokens=estimated_tokens,
+                    key_terms=[term],
+                )
+            )
 
         # Analyze dependencies based on document links
         dependencies = self._analyze_document_links(term_sections)
 
         # Generate suggested sequence using topological sort
-        suggested_sequence = self._topological_sort(
-            len(sub_queries), dependencies
-        )
+        suggested_sequence = self._topological_sort(len(sub_queries), dependencies)
 
         # Calculate total estimated tokens
         total_estimated = sum(sq.estimated_tokens for sq in sub_queries)
@@ -1911,10 +2038,12 @@ class RLMEngine:
             if isinstance(q, str):
                 queries.append({"query": q, "max_tokens": None})
             elif isinstance(q, dict):
-                queries.append({
-                    "query": q.get("query", ""),
-                    "max_tokens": q.get("max_tokens"),
-                })
+                queries.append(
+                    {
+                        "query": q.get("query", ""),
+                        "max_tokens": q.get("max_tokens"),
+                    }
+                )
 
         if not queries:
             return ToolResult(
@@ -1939,9 +2068,7 @@ class RLMEngine:
                 q["max_tokens"] = default_per_query
 
         # Execute queries in parallel
-        async def execute_single_query(
-            query_item: dict[str, Any]
-        ) -> MultiQueryResultItem:
+        async def execute_single_query(query_item: dict[str, Any]) -> MultiQueryResultItem:
             try:
                 query_params = {
                     "query": query_item["query"],
@@ -2043,79 +2170,91 @@ class RLMEngine:
         # Step 1: Always start with decomposition
         steps: list[PlanStep] = []
 
-        steps.append(PlanStep(
-            step=1,
-            action="decompose",
-            params={
-                "query": query,
-                "max_depth": 2,
-            },
-            depends_on=[],
-            expected_output="sub_queries",
-        ))
+        steps.append(
+            PlanStep(
+                step=1,
+                action="decompose",
+                params={
+                    "query": query,
+                    "max_depth": 2,
+                },
+                depends_on=[],
+                expected_output="sub_queries",
+            )
+        )
 
         # Step 2: Execute sub-queries based on strategy
         if strategy == PlanStrategy.BREADTH_FIRST:
             # Execute all sub-queries at same level first
-            steps.append(PlanStep(
-                step=2,
-                action="multi_query",
-                params={
-                    "queries": "$step1.sub_queries",
-                    "max_tokens": max_tokens - 2000,  # Reserve some for synthesis
-                    "search_mode": "hybrid",
-                },
-                depends_on=[1],
-                expected_output="sections",
-            ))
+            steps.append(
+                PlanStep(
+                    step=2,
+                    action="multi_query",
+                    params={
+                        "queries": "$step1.sub_queries",
+                        "max_tokens": max_tokens - 2000,  # Reserve some for synthesis
+                        "search_mode": "hybrid",
+                    },
+                    depends_on=[1],
+                    expected_output="sections",
+                )
+            )
         elif strategy == PlanStrategy.DEPTH_FIRST:
             # Execute sub-queries one at a time, depth first
-            steps.append(PlanStep(
-                step=2,
-                action="context_query",
-                params={
-                    "query": "$step1.sub_queries[0].query",
-                    "max_tokens": max_tokens // 4,
-                    "search_mode": "hybrid",
-                },
-                depends_on=[1],
-                expected_output="sections",
-            ))
-            steps.append(PlanStep(
-                step=3,
-                action="multi_query",
-                params={
-                    "queries": "$step1.sub_queries[1:]",
-                    "max_tokens": (max_tokens * 3) // 4 - 1000,
-                    "search_mode": "hybrid",
-                },
-                depends_on=[1, 2],
-                expected_output="sections",
-            ))
+            steps.append(
+                PlanStep(
+                    step=2,
+                    action="context_query",
+                    params={
+                        "query": "$step1.sub_queries[0].query",
+                        "max_tokens": max_tokens // 4,
+                        "search_mode": "hybrid",
+                    },
+                    depends_on=[1],
+                    expected_output="sections",
+                )
+            )
+            steps.append(
+                PlanStep(
+                    step=3,
+                    action="multi_query",
+                    params={
+                        "queries": "$step1.sub_queries[1:]",
+                        "max_tokens": (max_tokens * 3) // 4 - 1000,
+                        "search_mode": "hybrid",
+                    },
+                    depends_on=[1, 2],
+                    expected_output="sections",
+                )
+            )
         else:  # RELEVANCE_FIRST
             # Execute most relevant sub-query first, then batch rest
-            steps.append(PlanStep(
-                step=2,
-                action="context_query",
-                params={
-                    "query": "$step1.sub_queries[0].query",
-                    "max_tokens": max_tokens // 3,
-                    "search_mode": "hybrid",
-                },
-                depends_on=[1],
-                expected_output="sections",
-            ))
-            steps.append(PlanStep(
-                step=3,
-                action="multi_query",
-                params={
-                    "queries": "$step1.sub_queries[1:5]",  # Next 4 most relevant
-                    "max_tokens": (max_tokens * 2) // 3 - 1000,
-                    "search_mode": "hybrid",
-                },
-                depends_on=[1],
-                expected_output="sections",
-            ))
+            steps.append(
+                PlanStep(
+                    step=2,
+                    action="context_query",
+                    params={
+                        "query": "$step1.sub_queries[0].query",
+                        "max_tokens": max_tokens // 3,
+                        "search_mode": "hybrid",
+                    },
+                    depends_on=[1],
+                    expected_output="sections",
+                )
+            )
+            steps.append(
+                PlanStep(
+                    step=3,
+                    action="multi_query",
+                    params={
+                        "queries": "$step1.sub_queries[1:5]",  # Next 4 most relevant
+                        "max_tokens": (max_tokens * 2) // 3 - 1000,
+                        "search_mode": "hybrid",
+                    },
+                    depends_on=[1],
+                    expected_output="sections",
+                )
+            )
 
         # Estimate tokens and queries
         estimated_tokens = max_tokens
@@ -2170,9 +2309,7 @@ class RLMEngine:
     # ============ HELPER METHODS FOR RECURSIVE CONTEXT ============
 
     @staticmethod
-    def _build_phrase_query(
-        term: str, query_lower: str, all_terms: list[str]
-    ) -> str:
+    def _build_phrase_query(term: str, query_lower: str, all_terms: list[str]) -> str:
         """Build a phrase-level sub-query from a term and its original context.
 
         Instead of returning bare single-word terms like ``"prometheus"`` which
@@ -2247,9 +2384,7 @@ class RLMEngine:
 
         return dependencies
 
-    def _topological_sort(
-        self, num_queries: int, dependencies: list[tuple[int, int]]
-    ) -> list[int]:
+    def _topological_sort(self, num_queries: int, dependencies: list[tuple[int, int]]) -> list[int]:
         """
         Sort query IDs respecting dependencies using Kahn's algorithm.
 
@@ -2574,7 +2709,9 @@ class RLMEngine:
         # Require at least one filter
         if not summary_id and not document_path and not summary_type_str:
             return ToolResult(
-                data={"error": "At least one of summary_id, document_path, or summary_type is required"},
+                data={
+                    "error": "At least one of summary_id, document_path, or summary_type is required"
+                },
                 input_tokens=0,
                 output_tokens=0,
             )
@@ -2691,8 +2828,7 @@ class RLMEngine:
         # Apply category filter if specified
         if category_filter:
             shared_ctx.documents = [
-                d for d in shared_ctx.documents
-                if d.category in category_filter
+                d for d in shared_ctx.documents if d.category in category_filter
             ]
 
         # Allocate budget
@@ -2706,14 +2842,16 @@ class RLMEngine:
             except ValueError:
                 cat_enum = DocumentCategoryEnum.BEST_PRACTICES
 
-            doc_infos.append(SharedDocumentInfo(
-                id=doc.id,
-                title=doc.title,
-                category=cat_enum,
-                token_count=doc.token_count,
-                collection_name=doc.collection_name,
-                tags=doc.tags,
-            ))
+            doc_infos.append(
+                SharedDocumentInfo(
+                    id=doc.id,
+                    title=doc.title,
+                    category=cat_enum,
+                    token_count=doc.token_count,
+                    collection_name=doc.collection_name,
+                    tags=doc.tags,
+                )
+            )
 
         # Build merged content if requested
         merged_content: str | None = None
@@ -2772,16 +2910,18 @@ class RLMEngine:
         categories_seen: set[str] = set()
 
         for t in templates:
-            template_infos.append(PromptTemplateInfo(
-                id=t["id"],
-                name=t["name"],
-                slug=t["slug"],
-                description=t.get("description"),
-                prompt=t["prompt"],
-                variables=t.get("variables", []),
-                category=t["category"],
-                collection_name=t["collection_name"],
-            ))
+            template_infos.append(
+                PromptTemplateInfo(
+                    id=t["id"],
+                    name=t["name"],
+                    slug=t["slug"],
+                    description=t.get("description"),
+                    prompt=t["prompt"],
+                    variables=t.get("variables", []),
+                    category=t["category"],
+                    collection_name=t["collection_name"],
+                )
+            )
             categories_seen.add(t["category"])
 
         result = ListTemplatesResult(
@@ -2874,9 +3014,7 @@ class RLMEngine:
         for var_name in template_data.get("variables", []):
             placeholder = f"{{{{{var_name}}}}}"  # {{var_name}}
             if var_name in variables:
-                rendered_prompt = rendered_prompt.replace(
-                    placeholder, str(variables[var_name])
-                )
+                rendered_prompt = rendered_prompt.replace(placeholder, str(variables[var_name]))
             else:
                 missing_variables.append(var_name)
 
@@ -2892,9 +3030,7 @@ class RLMEngine:
             output_tokens=count_tokens(rendered_prompt),
         )
 
-    async def _handle_list_collections(
-        self, params: dict[str, Any]
-    ) -> ToolResult:
+    async def _handle_list_collections(self, params: dict[str, Any]) -> ToolResult:
         """
         Handle rlm_list_collections - list accessible shared context collections.
 
@@ -2929,9 +3065,7 @@ class RLMEngine:
                 output_tokens=0,
             )
 
-    async def _handle_upload_shared_document(
-        self, params: dict[str, Any]
-    ) -> ToolResult:
+    async def _handle_upload_shared_document(self, params: dict[str, Any]) -> ToolResult:
         """
         Handle rlm_upload_shared_document - upload a document to a shared collection.
 
@@ -3652,9 +3786,7 @@ class RLMEngine:
         size = len(content.encode())
 
         # Check if document exists
-        existing = await db.document.find_first(
-            where={"projectId": self.project_id, "path": path}
-        )
+        existing = await db.document.find_first(where={"projectId": self.project_id, "path": path})
 
         if existing:
             # Check if content changed
@@ -3738,9 +3870,7 @@ class RLMEngine:
         input_tokens = 0
 
         # Get all existing documents
-        existing_docs = await db.document.find_many(
-            where={"projectId": self.project_id}
-        )
+        existing_docs = await db.document.find_many(where={"projectId": self.project_id})
         existing_by_path = {doc.path: doc for doc in existing_docs}
         synced_paths = set()
 
@@ -3952,4 +4082,502 @@ class RLMEngine:
             data=result.model_dump(),
             input_tokens=0,
             output_tokens=count_tokens(str(result.model_dump())),
+        )
+
+    # ============ PHASE 12: RLM ORCHESTRATION HANDLERS ============
+
+    def _get_file_content(self, file_path: str) -> str | None:
+        """Get raw content for a single file using file boundary tracking.
+
+        Args:
+            file_path: The document path (e.g. 'docs/api.md')
+
+        Returns:
+            Raw file content as a string, or None if not found.
+        """
+        if not self.index or file_path not in self.index.file_boundaries:
+            return None
+        start, end = self.index.file_boundaries[file_path]
+        return "\n".join(self.index.lines[start:end])
+
+    async def _handle_load_document(self, params: dict[str, Any]) -> ToolResult:
+        """Handle rlm_load_document - return raw document content by path.
+
+        Enables RLM-style exploration where the model receives raw content
+        and navigates it with its own logic, rather than pre-optimized sections.
+
+        Plan-gating: PRO+
+        """
+        if self.plan not in RAW_DOCUMENT_PLANS:
+            return ToolResult(
+                data={
+                    "error": "rlm_load_document requires a Pro plan or higher.",
+                    "current_plan": self.plan.value,
+                    "upgrade_url": "https://app.snipara.com/settings/billing",
+                },
+                input_tokens=0,
+                output_tokens=0,
+            )
+
+        file_path = params.get("path", "")
+        if not file_path:
+            return ToolResult(
+                data={"error": "Missing required parameter: path"},
+                input_tokens=0,
+                output_tokens=0,
+            )
+
+        if not self.index:
+            return ToolResult(
+                data={"error": "No documentation loaded"},
+                input_tokens=0,
+                output_tokens=0,
+            )
+
+        content = self._get_file_content(file_path)
+        if content is None:
+            # Fuzzy match: suggest similar paths
+            available = self.index.files
+            suggestions = [f for f in available if file_path.split("/")[-1] in f]
+            return ToolResult(
+                data={
+                    "error": f"Document not found: {file_path}",
+                    "available_files": available[:20],
+                    "suggestions": suggestions[:5],
+                },
+                input_tokens=0,
+                output_tokens=0,
+            )
+
+        token_count = count_tokens(content)
+        response = {
+            "path": file_path,
+            "content": content,
+            "token_count": token_count,
+            "lines": content.count("\n") + 1,
+        }
+
+        return ToolResult(
+            data=response,
+            input_tokens=0,
+            output_tokens=token_count,
+        )
+
+    async def _handle_load_project(self, params: dict[str, Any]) -> ToolResult:
+        """Handle rlm_load_project - return structured map of all documents.
+
+        Returns a token-budgeted overview of every file in the project,
+        with optional path filtering and content inclusion.
+
+        Plan-gating: TEAM+
+        """
+        if self.plan not in ORCHESTRATION_PLANS:
+            return ToolResult(
+                data={
+                    "error": "rlm_load_project requires a Team plan or higher.",
+                    "current_plan": self.plan.value,
+                    "upgrade_url": "https://app.snipara.com/settings/billing",
+                },
+                input_tokens=0,
+                output_tokens=0,
+            )
+
+        if not self.index:
+            return ToolResult(
+                data={"error": "No documentation loaded"},
+                input_tokens=0,
+                output_tokens=0,
+            )
+
+        max_tokens = params.get("max_tokens", 16000)
+        paths_filter = params.get("paths_filter", [])
+        include_content = params.get("include_content", True)
+
+        files = self.index.files
+        if paths_filter:
+            # Filter to matching paths (prefix match)
+            files = [f for f in files if any(f.startswith(pf) for pf in paths_filter)]
+
+        documents: list[dict[str, Any]] = []
+        total_tokens = 0
+
+        for file_path in files:
+            content = self._get_file_content(file_path)
+            if content is None:
+                continue
+
+            file_tokens = count_tokens(content)
+
+            doc_entry: dict[str, Any] = {
+                "path": file_path,
+                "token_count": file_tokens,
+                "lines": content.count("\n") + 1,
+            }
+
+            if include_content:
+                # Check budget
+                if total_tokens + file_tokens > max_tokens:
+                    doc_entry["content"] = content[: (max_tokens - total_tokens) * 4]
+                    doc_entry["truncated"] = True
+                    documents.append(doc_entry)
+                    total_tokens = max_tokens
+                    break
+                else:
+                    doc_entry["content"] = content
+                    doc_entry["truncated"] = False
+                    total_tokens += file_tokens
+
+            documents.append(doc_entry)
+
+        response = {
+            "total_files": len(self.index.files),
+            "returned_files": len(documents),
+            "total_tokens": total_tokens,
+            "max_tokens": max_tokens,
+            "documents": documents,
+        }
+
+        return ToolResult(
+            data=response,
+            input_tokens=0,
+            output_tokens=total_tokens,
+        )
+
+    async def _handle_orchestrate(self, params: dict[str, Any]) -> ToolResult:
+        """Handle rlm_orchestrate - multi-round context exploration.
+
+        Performs a 3-round exploration strategy in a single tool call:
+          1. Sections scan: list all sections to understand project structure
+          2. Ranked search: run context_query to find top relevant sections
+          3. Raw load: load full raw content for the top-scoring files
+
+        This combines the intelligence of rlm_context_query with the raw
+        access of rlm_load_document, automated in one call.
+
+        Plan-gating: TEAM+
+        """
+        if self.plan not in ORCHESTRATION_PLANS:
+            return ToolResult(
+                data={
+                    "error": "rlm_orchestrate requires a Team plan or higher.",
+                    "current_plan": self.plan.value,
+                    "upgrade_url": "https://app.snipara.com/settings/billing",
+                },
+                input_tokens=0,
+                output_tokens=0,
+            )
+
+        query = params.get("query", "")
+        if not query:
+            return ToolResult(
+                data={"error": "Missing required parameter: query"},
+                input_tokens=0,
+                output_tokens=0,
+            )
+
+        max_tokens = params.get("max_tokens", 16000)
+        top_k = params.get("top_k", 5)
+        search_mode_str = params.get("search_mode", self.settings.search_mode)
+
+        try:
+            search_mode = SearchMode(search_mode_str)
+        except ValueError:
+            search_mode = SearchMode.KEYWORD
+
+        if not self.index:
+            return ToolResult(
+                data={"error": "No documentation loaded"},
+                input_tokens=0,
+                output_tokens=0,
+            )
+
+        # Round 1: Section scan (lightweight structure overview)
+        all_sections = [
+            {
+                "id": s.id,
+                "title": s.title,
+                "start_line": s.start_line,
+                "end_line": s.end_line,
+            }
+            for s in self.index.sections
+        ]
+
+        # Round 2: Ranked search (reuse scoring logic from context_query)
+        scored_sections = await self._score_sections(query, search_mode)
+
+        # Take top-k sections
+        top_sections = scored_sections[:top_k]
+
+        # Identify unique files that contain the top sections
+        file_hits: dict[str, float] = {}
+        for section, score in top_sections:
+            # Find which file contains this section
+            for file_path, (start, end) in self.index.file_boundaries.items():
+                if section.start_line >= start + 1 and section.end_line <= end:
+                    if file_path not in file_hits or score > file_hits[file_path]:
+                        file_hits[file_path] = score
+                    break
+
+        # Sort files by highest score
+        ranked_files = sorted(file_hits.items(), key=lambda x: x[1], reverse=True)
+
+        # Round 3: Load raw content for top files within budget
+        loaded_files: list[dict[str, Any]] = []
+        total_tokens = 0
+        remaining_budget = max_tokens
+
+        for file_path, score in ranked_files:
+            content = self._get_file_content(file_path)
+            if content is None:
+                continue
+
+            file_tokens = count_tokens(content)
+
+            if file_tokens <= remaining_budget:
+                loaded_files.append(
+                    {
+                        "path": file_path,
+                        "content": content,
+                        "token_count": file_tokens,
+                        "relevance_score": round(score, 4),
+                        "truncated": False,
+                    }
+                )
+                total_tokens += file_tokens
+                remaining_budget -= file_tokens
+            elif remaining_budget > 200:
+                # Partial load with remaining budget
+                truncated_content = content[: remaining_budget * 4]
+                trunc_tokens = count_tokens(truncated_content)
+                loaded_files.append(
+                    {
+                        "path": file_path,
+                        "content": truncated_content,
+                        "token_count": trunc_tokens,
+                        "relevance_score": round(score, 4),
+                        "truncated": True,
+                    }
+                )
+                total_tokens += trunc_tokens
+                remaining_budget -= trunc_tokens
+                break
+            else:
+                break
+
+        # Build ranked section summaries (Round 2 results without full content)
+        ranked_summaries = [
+            {
+                "title": section.title,
+                "relevance_score": round(score, 4),
+                "start_line": section.start_line,
+                "end_line": section.end_line,
+            }
+            for section, score in top_sections
+        ]
+
+        response = {
+            "query": query,
+            "rounds": {
+                "sections_scan": {
+                    "total_sections": len(all_sections),
+                    "total_files": len(self.index.files),
+                },
+                "ranked_search": {
+                    "top_sections": ranked_summaries,
+                    "search_mode": search_mode.value,
+                },
+                "raw_load": {
+                    "files_loaded": len(loaded_files),
+                    "total_tokens": total_tokens,
+                    "max_tokens": max_tokens,
+                    "documents": loaded_files,
+                },
+            },
+        }
+
+        return ToolResult(
+            data=response,
+            input_tokens=count_tokens(query),
+            output_tokens=total_tokens,
+        )
+
+    # ============ Phase 13: REPL Context Bridge ============
+
+    async def _handle_repl_context(self, params: dict[str, Any]) -> ToolResult:
+        """Handle rlm_repl_context - package project context for REPL consumption.
+
+        Returns project context as a structured Python-ready dict plus helper
+        code that can be injected into an rlm-runtime REPL session via
+        set_repl_context. Optionally filters by a relevance query.
+
+        Plan-gating: PRO+
+        """
+        if self.plan not in REPL_CONTEXT_PLANS:
+            return ToolResult(
+                data={
+                    "error": "rlm_repl_context requires a Pro plan or higher.",
+                    "current_plan": self.plan.value,
+                    "upgrade_url": "https://app.snipara.com/settings/billing",
+                },
+                input_tokens=0,
+                output_tokens=0,
+            )
+
+        if not self.index:
+            return ToolResult(
+                data={"error": "No documentation loaded"},
+                input_tokens=0,
+                output_tokens=0,
+            )
+
+        query = params.get("query", "")
+        max_tokens = params.get("max_tokens", 8000)
+        include_helpers = params.get("include_helpers", True)
+
+        # Build file map
+        files: dict[str, dict[str, Any]] = {}
+        total_tokens = 0
+
+        if query:
+            # Query-driven: score sections and load top files
+            search_mode_str = params.get("search_mode", self.settings.search_mode)
+            try:
+                search_mode = SearchMode(search_mode_str)
+            except ValueError:
+                search_mode = SearchMode.KEYWORD
+
+            scored_sections = await self._score_sections(query, search_mode)
+
+            # Map to files by highest score
+            file_scores: dict[str, float] = {}
+            for section, score in scored_sections:
+                for fp, (start, end) in self.index.file_boundaries.items():
+                    if section.start_line >= start + 1 and section.end_line <= end:
+                        if fp not in file_scores or score > file_scores[fp]:
+                            file_scores[fp] = score
+                        break
+
+            # Load files in score order within budget
+            for fp, score in sorted(file_scores.items(), key=lambda x: x[1], reverse=True):
+                content = self._get_file_content(fp)
+                if content is None:
+                    continue
+                ftokens = count_tokens(content)
+                if total_tokens + ftokens > max_tokens:
+                    if total_tokens == 0:
+                        # At least include first file truncated
+                        content = content[: max_tokens * 4]
+                        ftokens = count_tokens(content)
+                        files[fp] = {
+                            "content": content,
+                            "tokens": ftokens,
+                            "relevance": round(score, 4),
+                            "truncated": True,
+                        }
+                        total_tokens += ftokens
+                    break
+                files[fp] = {
+                    "content": content,
+                    "tokens": ftokens,
+                    "relevance": round(score, 4),
+                    "truncated": False,
+                }
+                total_tokens += ftokens
+        else:
+            # No query: load all files within budget
+            for fp in self.index.files:
+                content = self._get_file_content(fp)
+                if content is None:
+                    continue
+                ftokens = count_tokens(content)
+                if total_tokens + ftokens > max_tokens:
+                    break
+                files[fp] = {
+                    "content": content,
+                    "tokens": ftokens,
+                    "truncated": False,
+                }
+                total_tokens += ftokens
+
+        # Build section map
+        section_map = [
+            {
+                "title": s.title,
+                "file": next(
+                    (
+                        fp
+                        for fp, (start, end) in self.index.file_boundaries.items()
+                        if s.start_line >= start + 1 and s.end_line <= end
+                    ),
+                    "unknown",
+                ),
+                "lines": [s.start_line, s.end_line],
+            }
+            for s in self.index.sections
+        ]
+
+        # Helper functions as executable Python code for REPL injection
+        helpers_code = ""
+        if include_helpers:
+            helpers_code = '''import re as _re
+
+def peek(path, start=None, end=None):
+    """View file content or a line range."""
+    f = context.get("files", {}).get(path)
+    if not f:
+        avail = list(context.get("files", {}).keys())
+        return {"error": f"Not found: {path}", "available": avail[:10]}
+    lines = f["content"].split("\\n")
+    if start is not None:
+        end = end or start + 20
+        lines = lines[max(0, start - 1):end]
+    return "\\n".join(lines)
+
+def grep(pattern, path=None):
+    """Search across loaded files. Returns {file: [matching lines]}."""
+    results = {}
+    files = context.get("files", {})
+    targets = {path: files[path]} if path and path in files else files
+    for fp, fdata in targets.items():
+        matches = []
+        for i, line in enumerate(fdata["content"].split("\\n"), 1):
+            if _re.search(pattern, line):
+                matches.append(f"{i}: {line}")
+        if matches:
+            results[fp] = matches
+    return results
+
+def sections(path=None):
+    """List sections, optionally filtered to a file."""
+    secs = context.get("sections", [])
+    if path:
+        secs = [s for s in secs if s.get("file") == path]
+    return secs
+
+def files():
+    """List loaded files with token counts."""
+    return {fp: {"tokens": f["tokens"], "truncated": f.get("truncated", False)}
+            for fp, f in context.get("files", {}).items()}
+'''
+
+        response = {
+            "context_data": {
+                "files": files,
+                "sections": section_map,
+                "total_files_in_project": len(self.index.files),
+                "loaded_files": len(files),
+            },
+            "setup_code": helpers_code,
+            "total_tokens": total_tokens,
+            "usage_hint": (
+                "Inject into REPL: call set_repl_context(key='context', "
+                "value=<context_data>), then execute_python with setup_code, "
+                "then use peek(), grep(), sections(), files() helpers."
+            ),
+        }
+
+        return ToolResult(
+            data=response,
+            input_tokens=count_tokens(query) if query else 0,
+            output_tokens=total_tokens,
         )
