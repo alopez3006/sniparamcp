@@ -1582,7 +1582,7 @@ class RLMEngine:
                     sid
                     for sid, score in sorted(
                         keyword_scores.items(), key=lambda x: x[1], reverse=True
-                    )[:100]
+                    )[:20]
                     if score > 0
                 }
                 semantic_scores = await self._calculate_semantic_scores(
@@ -1641,7 +1641,7 @@ class RLMEngine:
         self,
         query: str,
         candidate_ids: set[str] | None = None,
-        max_sections: int = 100,
+        max_sections: int = 20,
     ) -> dict[str, float]:
         """
         Calculate semantic similarity scores for sections.
@@ -1653,8 +1653,8 @@ class RLMEngine:
         Args:
             query: The search query string.
             candidate_ids: If provided, only embed these section IDs (e.g. top keyword hits).
-            max_sections: Hard cap on sections to embed (default 100). Prevents
-                timeout when embedding on-the-fly for large projects.
+            max_sections: Hard cap on sections to embed (default 20). bge-large-en-v1.5
+                takes ~2s per text on CPU; 20 sections ≈ 10-15s (within 60s timeout).
         """
         if not self.index or not self.index.sections:
             return {}
@@ -1678,9 +1678,11 @@ class RLMEngine:
             # Generate query embedding (async to avoid blocking event loop)
             query_embedding = await embeddings_service.embed_text_async(query)
 
-            # Generate section embeddings
+            # Generate section embeddings (title + truncated content)
+            # Using 200 chars (not 500) to reduce tokenization cost on CPU.
+            # bge-large-en-v1.5 takes ~2s/text on Railway CPU at 500 chars.
             section_texts = [
-                f"{s.title}\n{s.content[:500]}"  # Use title + first 500 chars
+                f"{s.title}\n{s.content[:200]}"
                 for s in sections
             ]
             section_embeddings = await embeddings_service.embed_texts_async(section_texts)
