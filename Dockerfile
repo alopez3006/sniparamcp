@@ -37,6 +37,11 @@ FROM python:3.12-slim AS runtime
 
 WORKDIR /app
 
+# Install runtime dependencies required by Prisma's bundled Node.js
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libatomic1 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Create non-root user
 RUN groupadd --gid 1000 appgroup && \
     useradd --uid 1000 --gid appgroup --shell /bin/bash appuser
