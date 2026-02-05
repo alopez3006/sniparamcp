@@ -86,6 +86,27 @@ from .services.swarm_events import (
 )
 
 # ---------------------------------------------------------------------------
+# Stop words — excluded from keyword scoring to prevent false title matches.
+# Without this, "what are prices?" ranks "What Happens When Limits Are Exceeded"
+# above actual pricing content because "what" and "are" get 5x title weight.
+# ---------------------------------------------------------------------------
+_STOP_WORDS = frozenset({
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "need",
+    "to", "of", "in", "for", "on", "with", "at", "by", "from", "as",
+    "into", "through", "during", "before", "after", "above", "below",
+    "between", "out", "off", "over", "under", "again", "further",
+    "then", "once", "here", "there", "when", "where", "why", "how",
+    "all", "both", "each", "few", "more", "most", "other", "some",
+    "such", "no", "nor", "not", "only", "own", "same", "so", "than",
+    "too", "very", "just", "because", "but", "and", "or", "if",
+    "what", "which", "who", "whom", "this", "that", "these", "those",
+    "it", "its", "my", "your", "his", "her", "our", "their", "about",
+    "up", "also", "any", "many", "much",
+})
+
+# ---------------------------------------------------------------------------
 # Adaptive Hybrid Search: weight profiles & RRF constant
 # ---------------------------------------------------------------------------
 # When keyword ranking has high confidence (exact title match, specific terms),
@@ -1529,7 +1550,7 @@ class RLMEngine:
         if not self.index:
             return []
 
-        keywords = re.findall(r"\w+", query.lower())
+        keywords = [w for w in re.findall(r"\w+", query.lower()) if w not in _STOP_WORDS]
         scored: list[tuple[Section, float]] = []
 
         # Calculate keyword scores for all sections (always in-memory, fast)
