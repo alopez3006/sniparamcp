@@ -35,6 +35,7 @@ from .models import (
     MCPResponse,
     MultiProjectQueryParams,
     Plan,
+    ReadyResponse,
     ToolName,
     UsageInfo,
 )
@@ -189,9 +190,9 @@ class IPRateLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
-        # Skip health check endpoint
+        # Skip health/readiness check endpoints
         path = scope.get("path", "")
-        if path == "/health":
+        if path in ("/health", "/ready"):
             await self.app(scope, receive, send)
             return
 
@@ -242,6 +243,15 @@ async def lifespan(app: FastAPI):
         )
 
     await get_db()  # Initialize database connection
+
+    # Pre-load embedding model to avoid cold-start blocking workers
+    from .services.embeddings import EmbeddingsService
+
+    try:
+        EmbeddingsService.preload()
+    except Exception as e:
+        logger.warning(f"Embedding model preload failed (will retry on first use): {e}")
+
     yield
     # Shutdown
     await close_db()
@@ -616,11 +626,44 @@ async def general_exception_handler(request: Request, exc: Exception):
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check() -> HealthResponse:
-    """Health check endpoint."""
+    """Health check endpoint (lightweight liveness check)."""
     return HealthResponse(
         status="healthy",
         version=__version__,
         timestamp=datetime.utcnow(),
+    )
+
+
+@app.get("/ready", tags=["Health"])
+async def readiness_check():
+    """Readiness check - verifies DB and embedding model are operational."""
+    from .services.embeddings import EmbeddingsService
+
+    checks: dict[str, bool] = {}
+    all_ok = True
+
+    # Check database connectivity
+    try:
+        db = await get_db()
+        await db.query_raw("SELECT 1")
+        checks["database"] = True
+    except Exception:
+        checks["database"] = False
+        all_ok = False
+
+    # Check embedding model is loaded
+    checks["embedding_model"] = EmbeddingsService.get_instance().is_loaded()
+    if not checks["embedding_model"]:
+        all_ok = False
+
+    response = ReadyResponse(
+        status="ready" if all_ok else "not_ready",
+        version=__version__,
+        checks=checks,
+    )
+    return JSONResponse(
+        content=response.model_dump(mode="json"),
+        status_code=200 if all_ok else 503,
     )
 
 

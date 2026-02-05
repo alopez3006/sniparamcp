@@ -210,6 +210,15 @@ class HealthResponse(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 
+class ReadyResponse(BaseModel):
+    """Readiness check response with component statuses."""
+
+    status: str = Field(default="ready")
+    version: str = Field(default="1.0.0")
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    checks: dict[str, bool] = Field(default_factory=dict, description="Component health checks")
+
+
 class LimitsInfo(BaseModel):
     """Usage limits information."""
 

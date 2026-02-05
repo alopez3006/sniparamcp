@@ -52,6 +52,19 @@ class EmbeddingsService:
             cls._instance = cls()
         return cls._instance
 
+    @classmethod
+    def preload(cls) -> None:
+        """Pre-load the embedding model into memory.
+
+        Call during application startup to avoid cold-start latency
+        on the first semantic query. Safe to call multiple times.
+        """
+        instance = cls.get_instance()
+        if not instance.is_loaded():
+            logger.info("Pre-loading embedding model during startup...")
+            instance._load_model()
+            logger.info("Embedding model pre-loaded successfully")
+
     def _load_model(self) -> SentenceTransformer:
         """Load the sentence transformer model (lazy loading).
 

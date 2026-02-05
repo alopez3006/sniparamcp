@@ -27,6 +27,10 @@ ENV HOME="/home/appuser"
 COPY prisma ./prisma
 RUN prisma generate
 
+# Pre-download embedding model to avoid runtime network dependency
+# Model is cached in /home/appuser/.cache/huggingface/
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-large-en-v1.5', device='cpu')"
+
 
 # ============ RUNTIME STAGE ============
 FROM python:3.12-slim AS runtime
@@ -62,10 +66,11 @@ USER appuser
 # Expose port
 EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import httpx; httpx.get('http://localhost:8000/health')" || exit 1
+# Health check - use /ready for full readiness verification
+# start-period=120s accounts for embedding model preload + DB init
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD python -c "import httpx; r = httpx.get('http://localhost:8000/ready', timeout=10); exit(0 if r.status_code == 200 else 1)" || exit 1
 
 # Run database initialization then start the server
-# Workers = 2 (optimized for 8GB RAM)
-CMD ["bash", "-c", "bash scripts/init-db.sh && gunicorn src.server:app -w 2 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:8000 --timeout 120 --graceful-timeout 30"]
+# Workers = 4 (optimized for 32GB RAM — each worker ~2GB with embedding model)
+CMD ["bash", "-c", "bash scripts/init-db.sh && gunicorn src.server:app -w 4 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:8000 --timeout 120 --graceful-timeout 30"]
