@@ -14,11 +14,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Install Python dependencies (with cache mount for faster rebuilds)
+# Install Python dependencies
 COPY requirements.txt .
-RUN --mount=type=cache,id=s/558f5978-783f-4b42-929f-3bfaab34d012-/root/.cache/pip,target=/root/.cache/pip \
-    pip install --upgrade pip && \
-    pip install -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Create appuser home directory structure for Prisma cache
 RUN mkdir -p /home/appuser/.cache
@@ -29,18 +28,11 @@ COPY prisma ./prisma
 RUN prisma generate
 
 # Pre-download embedding models to avoid runtime network dependency
-# Cache mount speeds up rebuilds - downloads go to cache, then copy to image
+# Models are cached in /home/appuser/.cache/huggingface/
 # Primary model: bge-large (1024 dims) — pgvector indexing, memory, chunk search
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-large-en-v1.5', device='cpu')"
 # Light model: bge-small (384 dims) — on-the-fly fallback path (~10x faster on CPU)
-RUN --mount=type=cache,id=s/558f5978-783f-4b42-929f-3bfaab34d012-/tmp/hf_cache,target=/tmp/hf_cache \
-    TRANSFORMERS_CACHE=/tmp/hf_cache \
-    HF_HOME=/tmp/hf_cache \
-    python -c "\
-from sentence_transformers import SentenceTransformer; \
-SentenceTransformer('BAAI/bge-large-en-v1.5', device='cpu'); \
-SentenceTransformer('BAAI/bge-small-en-v1.5', device='cpu')" && \
-    mkdir -p /home/appuser/.cache/huggingface && \
-    cp -r /tmp/hf_cache/* /home/appuser/.cache/huggingface/
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5', device='cpu')"
 
 
 # ============ RUNTIME STAGE ============
