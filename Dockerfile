@@ -16,7 +16,7 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 # Install Python dependencies (with cache mount for faster rebuilds)
 COPY requirements.txt .
-RUN --mount=type=cache,target=/root/.cache/pip \
+RUN --mount=type=cache,id=pip-cache,target=/root/.cache/pip \
     pip install --upgrade pip && \
     pip install -r requirements.txt
 
@@ -32,7 +32,7 @@ RUN prisma generate
 # Cache mount speeds up rebuilds - downloads go to cache, then copy to image
 # Primary model: bge-large (1024 dims) — pgvector indexing, memory, chunk search
 # Light model: bge-small (384 dims) — on-the-fly fallback path (~10x faster on CPU)
-RUN --mount=type=cache,target=/tmp/hf_cache \
+RUN --mount=type=cache,id=hf-cache,target=/tmp/hf_cache \
     TRANSFORMERS_CACHE=/tmp/hf_cache \
     HF_HOME=/tmp/hf_cache \
     python -c "\
