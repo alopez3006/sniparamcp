@@ -429,6 +429,9 @@ class DocumentationIndex:
     total_chars: int = 0
     # File boundary tracking: maps file path → (start_line_0indexed, end_line_0indexed_exclusive)
     file_boundaries: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # Auto-detected ubiquitous keywords (terms appearing in >70% of section titles)
+    # These are excluded from distinctive keyword matching to avoid false relevance
+    ubiquitous_keywords: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -519,6 +522,9 @@ class RLMEngine:
             # Parse sections from this document
             self._parse_sections(doc_lines, line_offset, doc.path)
 
+        # Compute ubiquitous keywords after all sections are indexed
+        self._compute_ubiquitous_keywords()
+
     def _parse_sections(self, lines: list[str], offset: int, file_path: str) -> None:
         """Parse markdown sections from lines.
 
@@ -594,6 +600,60 @@ class RLMEngine:
         clean = re.sub(r"\s+", "_", clean.strip())
         clean = clean.upper()[:20]
         return f"[{clean}]"
+
+    def _compute_ubiquitous_keywords(self) -> None:
+        """Compute ubiquitous keywords from section titles.
+
+        Ubiquitous keywords are terms that appear in >70% of section titles.
+        These are typically project names or common terms that provide no
+        discriminative value for relevance filtering.
+
+        Example: In a project called "snipara", the term "snipara" might appear
+        in 80% of section titles, so it shouldn't count toward relevance.
+        """
+        if self.index is None or not self.index.sections:
+            return
+
+        # Common stop words to always exclude
+        stop_words = {
+            "the", "a", "an", "of", "in", "to", "for", "and", "or", "is", "are",
+            "with", "from", "by", "on", "at", "as", "be", "this", "that", "it",
+            "not", "but", "what", "all", "were", "we", "when", "your", "can",
+            "had", "have", "was", "one", "our", "out", "you", "her", "has",
+            "how", "use", "using", "used", "overview", "introduction", "guide",
+        }
+
+        # Count keyword occurrences across all section titles
+        keyword_section_count: dict[str, int] = {}
+        total_sections = len(self.index.sections)
+
+        for section in self.index.sections:
+            # Extract keywords from title (lowercase, alphanumeric only)
+            title_words = re.sub(r"[^a-zA-Z0-9\s]", " ", section.title.lower()).split()
+            # Filter short words and stop words
+            title_keywords = {w for w in title_words if len(w) > 2 and w not in stop_words}
+
+            for kw in title_keywords:
+                keyword_section_count[kw] = keyword_section_count.get(kw, 0) + 1
+
+        # Mark keywords appearing in >70% of sections as ubiquitous
+        threshold = 0.70
+        ubiquitous = set()
+        for kw, count in keyword_section_count.items():
+            frequency = count / total_sections
+            if frequency >= threshold:
+                ubiquitous.add(kw)
+                logger.debug(
+                    f"Ubiquitous keyword detected: '{kw}' appears in {count}/{total_sections} "
+                    f"({frequency:.1%}) section titles"
+                )
+
+        self.index.ubiquitous_keywords = ubiquitous
+
+        if ubiquitous:
+            logger.info(
+                f"Auto-detected {len(ubiquitous)} ubiquitous keywords: {sorted(ubiquitous)}"
+            )
 
     async def load_session_context(self) -> None:
         """Load persisted session context from database."""
@@ -1627,12 +1687,12 @@ class RLMEngine:
         # Handle different search modes
         if search_mode == SearchMode.KEYWORD:
             # Pure keyword search with relevance filtering for multi-keyword queries.
-            # Problem: "snipara" appears everywhere, so irrelevant sections rank highly.
+            # Problem: Project-specific terms appear everywhere, so irrelevant sections rank highly.
             # Solution: For 3+ keyword queries, require either:
             #   - 1+ NON-ubiquitous keyword in title (distinctive match), OR
             #   - High content score (>50) indicating strong relevance
-            # Ubiquitous keywords (project name, common terms) don't count for title matching.
-            ubiquitous_keywords = {"snipara", "rlm", "mcp"}  # Project-specific common terms
+            # Ubiquitous keywords (auto-detected from section titles) don't count for title matching.
+            ubiquitous_keywords = self.index.ubiquitous_keywords
             for section in self.index.sections:
                 score = keyword_scores[section.id]
                 if score <= 0:
@@ -1759,12 +1819,13 @@ class RLMEngine:
                     final_score *= 1.10  # Smaller boost since graded already separates
 
                 # Filter out sections with insufficient relevance for multi-keyword queries.
-                # Problem: "snipara" appears everywhere, so sections like "VS Code Extension"
+                # Problem: Project-specific terms appear everywhere, so sections like "VS Code Extension"
                 # rank highly for queries like "What is Snipara's value proposition?"
                 # Solution: For 3+ keyword queries, require either:
                 #   - 1+ NON-ubiquitous keyword in title (distinctive match), OR
                 #   - High keyword score (>50) OR high semantic score (>40)
-                ubiquitous_keywords = {"snipara", "rlm", "mcp"}
+                # Ubiquitous keywords are auto-detected from section titles at index time.
+                ubiquitous_keywords = self.index.ubiquitous_keywords
                 if len(keywords) >= 3:
                     title_lower = section.title.lower()
                     distinctive_title_hits = sum(
