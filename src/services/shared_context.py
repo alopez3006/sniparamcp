@@ -10,14 +10,14 @@ their documents with the project's own documentation, respecting:
 import hashlib
 import logging
 from dataclasses import dataclass, field
-from enum import StrEnum
+from enum import Enum
 
 from ..db import get_db
 
 logger = logging.getLogger(__name__)
 
 
-class DocumentCategory(StrEnum):
+class DocumentCategory(str, Enum):
     """Document category for token budget allocation."""
 
     MANDATORY = "MANDATORY"
