@@ -1727,17 +1727,25 @@ class RLMEngine:
                 if kw > 5 and sem > 30:
                     final_score *= 1.10  # Smaller boost since graded already separates
 
-                # Filter out pure semantic matches with zero keyword relevance.
-                # This prevents sections like "Language Model Tools" from ranking
-                # highly for queries like "What is Snipara's value proposition?"
-                # just because they're semantically related to LLM topics.
-                # For multi-keyword queries (3+), require at least minimal keyword signal.
-                if kw == 0 and len(keywords) >= 3:
-                    logger.debug(
-                        f"Skipping '{section.title}' (0 keyword hits, sem={sem:.1f}) "
-                        f"- pure semantic match for multi-keyword query"
+                # Filter out sections with insufficient TITLE keyword relevance.
+                # This prevents sections like "Snipara VS Code Extension" from ranking
+                # highly for queries like "What is Snipara's value proposition?" just
+                # because they contain "snipara" (which appears everywhere).
+                # For multi-keyword queries (3+), require at least 2 keywords to match
+                # in the TITLE, not just content. This ensures topical relevance.
+                if len(keywords) >= 3:
+                    title_lower = section.title.lower()
+                    title_hits = sum(
+                        1 for kw in keywords
+                        if kw in title_lower
+                        or (_stem_keyword(kw) != kw and _stem_keyword(kw) in title_lower)
                     )
-                    continue
+                    if title_hits < 2:
+                        logger.debug(
+                            f"Skipping '{section.title}' (only {title_hits} title keyword hits) "
+                            f"- insufficient title relevance for multi-keyword query"
+                        )
+                        continue
 
                 if final_score > 3:  # ~3 % of max score
                     scored.append((section, final_score))
