@@ -1317,10 +1317,16 @@ class RLMEngine:
                                 if kw in title_lower
                                 or (_stem_keyword(kw) != kw and _stem_keyword(kw) in title_lower)
                             )
-                            if hits == 0:
+                            # Require 2+ keyword matches for queries with 3+ keywords.
+                            # This prevents single-word false positives like "Language Model Tools"
+                            # matching any query containing "model" or "tools".
+                            # For short queries (1-2 keywords), allow single match to preserve
+                            # queries like "authentication" matching "Authentication Standards".
+                            min_required = 2 if len(query_keywords) > 2 else 1
+                            if hits < min_required:
                                 logger.debug(
                                     f"Skipping shared doc '{doc.title}' "
-                                    f"(no title keyword match)"
+                                    f"({hits} keyword hits < {min_required} required)"
                                 )
                                 continue
 
