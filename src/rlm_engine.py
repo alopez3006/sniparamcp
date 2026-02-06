@@ -1708,6 +1708,9 @@ class RLMEngine:
             #   - High content score (>50) indicating strong relevance
             # Ubiquitous keywords (auto-detected from section titles) don't count for title matching.
             ubiquitous_keywords = self.index.ubiquitous_keywords
+            logger.debug(
+                f"Keyword search: ubiquitous_keywords={sorted(ubiquitous_keywords) if ubiquitous_keywords else '(empty)'}"
+            )
             for section in self.index.sections:
                 score = keyword_scores[section.id]
                 if score <= 0:
@@ -1761,6 +1764,14 @@ class RLMEngine:
         elif search_mode == SearchMode.HYBRID:
             # Combined keyword + semantic search via Reciprocal Rank Fusion
             # with adaptive weights based on query characteristics.
+
+            # Log ubiquitous keywords for debugging relevance filter
+            ubiq_kws = self.index.ubiquitous_keywords
+            logger.debug(
+                f"Hybrid search: ubiquitous_keywords={sorted(ubiq_kws) if ubiq_kws else '(empty)'}, "
+                f"query_keywords={keywords[:5]}"
+            )
+
             use_chunks = await self._has_precomputed_chunks()
 
             if use_chunks:
@@ -1856,8 +1867,8 @@ class RLMEngine:
                         pass  # High relevance score - keep
                     else:
                         logger.debug(
-                            f"Skipping '{section.title}' (distinctive_hits={distinctive_title_hits}, "
-                            f"kw={kw:.1f}, sem={sem:.1f}) - insufficient relevance"
+                            f"Filtering out '{section.title}' (distinctive_hits={distinctive_title_hits}, "
+                            f"kw={kw:.1f}, sem={sem:.1f})"
                         )
                         continue
 
