@@ -1727,6 +1727,18 @@ class RLMEngine:
                 if kw > 5 and sem > 30:
                     final_score *= 1.10  # Smaller boost since graded already separates
 
+                # Filter out pure semantic matches with zero keyword relevance.
+                # This prevents sections like "Language Model Tools" from ranking
+                # highly for queries like "What is Snipara's value proposition?"
+                # just because they're semantically related to LLM topics.
+                # For multi-keyword queries (3+), require at least minimal keyword signal.
+                if kw == 0 and len(keywords) >= 3:
+                    logger.debug(
+                        f"Skipping '{section.title}' (0 keyword hits, sem={sem:.1f}) "
+                        f"- pure semantic match for multi-keyword query"
+                    )
+                    continue
+
                 if final_score > 3:  # ~3 % of max score
                     scored.append((section, final_score))
 
