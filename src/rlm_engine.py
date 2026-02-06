@@ -298,35 +298,37 @@ _QUERY_TYPE_PATTERNS: dict[QueryType, list[str]] = {
 }
 
 # Query type to search parameters mapping
+# NOTE: score_threshold values are intentionally low (0-15) because RLM
+# scores typically range 10-80 for matches. Higher thresholds filter too aggressively.
 _QUERY_TYPE_PARAMS: dict[QueryType, dict] = {
     QueryType.DEFINITIONAL: {
-        "max_sections": 5,      # Focused, precise results
-        "score_threshold": 60,  # Higher threshold for quality
+        "max_sections": 8,      # Focused, precise results
+        "score_threshold": 15,  # Low threshold - rely on ranking instead
         "prefer_exact": True,   # Prefer exact keyword matches
     },
     QueryType.NAVIGATIONAL: {
-        "max_sections": 3,      # Very focused
-        "score_threshold": 50,
+        "max_sections": 5,      # Very focused
+        "score_threshold": 10,
         "prefer_exact": True,
     },
     QueryType.CONCEPTUAL: {
-        "max_sections": 12,     # Broader context needed
-        "score_threshold": 40,
+        "max_sections": 15,     # Broader context needed
+        "score_threshold": 5,   # Very low - include more context
         "prefer_exact": False,  # Allow semantic matches
     },
     QueryType.TROUBLESHOOTING: {
-        "max_sections": 10,
-        "score_threshold": 35,
+        "max_sections": 12,
+        "score_threshold": 5,
         "prefer_exact": False,
     },
     QueryType.COMPARATIVE: {
         "max_sections": 15,     # Need multiple perspectives
-        "score_threshold": 35,
+        "score_threshold": 5,
         "prefer_exact": False,
     },
     QueryType.PROCEDURAL: {
-        "max_sections": 8,
-        "score_threshold": 45,
+        "max_sections": 10,
+        "score_threshold": 10,
         "prefer_exact": True,
     },
 }
