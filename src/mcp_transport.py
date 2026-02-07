@@ -49,7 +49,7 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from .auth import get_project_with_team, validate_api_key, validate_oauth_token
+from .auth import get_effective_plan, get_project_with_team, validate_api_key, validate_oauth_token
 from .config import settings
 from .models import Plan, ToolName
 from .rlm_engine import RLMEngine
@@ -60,6 +60,19 @@ from .usage import (
     log_security_event,
     track_usage,
 )
+
+# ============ HELPERS ============
+
+
+def _get_client_ip(request: Request) -> str | None:
+    """Extract client IP from X-Forwarded-For header or direct connection."""
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    if request.client:
+        return request.client.host
+    return None
+
 
 # ============ ROUTER CONFIGURATION ============
 
@@ -94,10 +107,24 @@ TOOL_DEFINITIONS = [
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Question or topic"},
-                "max_tokens": {"type": "integer", "default": 4000, "minimum": 100, "maximum": 100000},
-                "search_mode": {"type": "string", "enum": ["keyword", "semantic", "hybrid"], "default": "hybrid"},
+                "max_tokens": {
+                    "type": "integer",
+                    "default": 4000,
+                    "minimum": 100,
+                    "maximum": 100000,
+                },
+                "search_mode": {
+                    "type": "string",
+                    "enum": ["keyword", "semantic", "hybrid"],
+                    "default": "hybrid",
+                },
                 "include_metadata": {"type": "boolean", "default": True},
                 "prefer_summaries": {"type": "boolean", "default": False},
+                "return_references": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Return chunk references (IDs + previews) instead of full content. Use rlm_get_chunk to retrieve full content by ID. Reduces hallucination by maintaining clear source attribution.",
+                },
             },
             "required": ["query"],
         },
@@ -143,8 +170,16 @@ TOOL_DEFINITIONS = [
             "properties": {
                 "queries": {
                     "type": "array",
-                    "items": {"type": "object", "properties": {"query": {"type": "string"}, "max_tokens": {"type": "integer"}}, "required": ["query"]},
-                    "minItems": 1, "maxItems": 10,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"},
+                            "max_tokens": {"type": "integer"},
+                        },
+                        "required": ["query"],
+                    },
+                    "minItems": 1,
+                    "maxItems": 10,
                 },
                 "max_tokens": {"type": "integer", "default": 8000},
             },
@@ -164,7 +199,12 @@ TOOL_DEFINITIONS = [
                     "default": "relevance_first",
                     "description": "Execution strategy",
                 },
-                "max_tokens": {"type": "integer", "default": 16000, "minimum": 1000, "maximum": 100000},
+                "max_tokens": {
+                    "type": "integer",
+                    "default": 16000,
+                    "minimum": 1000,
+                    "maximum": 100000,
+                },
             },
             "required": ["query"],
         },
@@ -176,7 +216,12 @@ TOOL_DEFINITIONS = [
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Question or topic"},
-                "max_tokens": {"type": "integer", "default": 4000, "minimum": 100, "maximum": 100000},
+                "max_tokens": {
+                    "type": "integer",
+                    "default": 4000,
+                    "minimum": 100,
+                    "maximum": 100000,
+                },
                 "per_project_limit": {"type": "integer", "default": 3, "minimum": 1, "maximum": 20},
                 "project_ids": {
                     "type": "array",
@@ -188,7 +233,11 @@ TOOL_DEFINITIONS = [
                     "items": {"type": "string"},
                     "description": "Optional project IDs/slugs to exclude",
                 },
-                "search_mode": {"type": "string", "enum": ["keyword", "semantic", "hybrid"], "default": "keyword"},
+                "search_mode": {
+                    "type": "string",
+                    "enum": ["keyword", "semantic", "hybrid"],
+                    "default": "keyword",
+                },
                 "include_metadata": {"type": "boolean", "default": True},
                 "prefer_summaries": {"type": "boolean", "default": False},
             },
@@ -200,7 +249,10 @@ TOOL_DEFINITIONS = [
         "description": "Set session context for subsequent queries.",
         "inputSchema": {
             "type": "object",
-            "properties": {"context": {"type": "string"}, "append": {"type": "boolean", "default": False}},
+            "properties": {
+                "context": {"type": "string"},
+                "append": {"type": "boolean", "default": False},
+            },
             "required": ["context"],
         },
     },
@@ -258,7 +310,11 @@ TOOL_DEFINITIONS = [
             "properties": {
                 "document_path": {"type": "string"},
                 "summary": {"type": "string"},
-                "summary_type": {"type": "string", "enum": ["concise", "detailed", "technical", "keywords", "custom"], "default": "concise"},
+                "summary_type": {
+                    "type": "string",
+                    "enum": ["concise", "detailed", "technical", "keywords", "custom"],
+                    "default": "concise",
+                },
                 "generated_by": {"type": "string"},
             },
             "required": ["document_path", "summary"],
@@ -271,7 +327,10 @@ TOOL_DEFINITIONS = [
             "type": "object",
             "properties": {
                 "document_path": {"type": "string"},
-                "summary_type": {"type": "string", "enum": ["concise", "detailed", "technical", "keywords", "custom"]},
+                "summary_type": {
+                    "type": "string",
+                    "enum": ["concise", "detailed", "technical", "keywords", "custom"],
+                },
                 "include_content": {"type": "boolean", "default": True},
             },
             "required": [],
@@ -293,13 +352,25 @@ TOOL_DEFINITIONS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "max_tokens": {"type": "integer", "default": 4000, "minimum": 100, "maximum": 100000},
+                "max_tokens": {
+                    "type": "integer",
+                    "default": 4000,
+                    "minimum": 100,
+                    "maximum": 100000,
+                },
                 "categories": {
                     "type": "array",
-                    "items": {"type": "string", "enum": ["MANDATORY", "BEST_PRACTICES", "GUIDELINES", "REFERENCE"]},
+                    "items": {
+                        "type": "string",
+                        "enum": ["MANDATORY", "BEST_PRACTICES", "GUIDELINES", "REFERENCE"],
+                    },
                     "description": "Filter by categories (default: all)",
                 },
-                "include_content": {"type": "boolean", "default": True, "description": "Include merged content"},
+                "include_content": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Include merged content",
+                },
             },
             "required": [],
         },
@@ -386,12 +457,31 @@ TOOL_DEFINITIONS = [
             "type": "object",
             "properties": {
                 "content": {"type": "string", "description": "The memory content to store"},
-                "type": {"type": "string", "enum": ["fact", "decision", "learning", "preference", "todo", "context"], "default": "fact"},
-                "scope": {"type": "string", "enum": ["agent", "project", "team", "user"], "default": "project"},
+                "type": {
+                    "type": "string",
+                    "enum": ["fact", "decision", "learning", "preference", "todo", "context"],
+                    "default": "fact",
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["agent", "project", "team", "user"],
+                    "default": "project",
+                },
                 "category": {"type": "string", "description": "Optional category for grouping"},
-                "ttl_days": {"type": "integer", "description": "Days until expiration (null = permanent)"},
-                "related_to": {"type": "array", "items": {"type": "string"}, "description": "IDs of related memories"},
-                "document_refs": {"type": "array", "items": {"type": "string"}, "description": "Referenced document paths"},
+                "ttl_days": {
+                    "type": "integer",
+                    "description": "Days until expiration (null = permanent)",
+                },
+                "related_to": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "IDs of related memories",
+                },
+                "document_refs": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Referenced document paths",
+                },
             },
             "required": ["content"],
         },
@@ -403,11 +493,22 @@ TOOL_DEFINITIONS = [
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Search query"},
-                "type": {"type": "string", "enum": ["fact", "decision", "learning", "preference", "todo", "context"]},
+                "type": {
+                    "type": "string",
+                    "enum": ["fact", "decision", "learning", "preference", "todo", "context"],
+                },
                 "scope": {"type": "string", "enum": ["agent", "project", "team", "user"]},
                 "category": {"type": "string", "description": "Filter by category"},
-                "limit": {"type": "integer", "default": 5, "description": "Maximum memories to return"},
-                "min_relevance": {"type": "number", "default": 0.5, "description": "Minimum relevance score (0-1)"},
+                "limit": {
+                    "type": "integer",
+                    "default": 5,
+                    "description": "Maximum memories to return",
+                },
+                "min_relevance": {
+                    "type": "number",
+                    "default": 0.5,
+                    "description": "Minimum relevance score (0-1)",
+                },
             },
             "required": ["query"],
         },
@@ -418,7 +519,10 @@ TOOL_DEFINITIONS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "type": {"type": "string", "enum": ["fact", "decision", "learning", "preference", "todo", "context"]},
+                "type": {
+                    "type": "string",
+                    "enum": ["fact", "decision", "learning", "preference", "todo", "context"],
+                },
                 "scope": {"type": "string", "enum": ["agent", "project", "team", "user"]},
                 "category": {"type": "string"},
                 "search": {"type": "string", "description": "Text search in content"},
@@ -435,9 +539,15 @@ TOOL_DEFINITIONS = [
             "type": "object",
             "properties": {
                 "memory_id": {"type": "string", "description": "Specific memory ID to delete"},
-                "type": {"type": "string", "enum": ["fact", "decision", "learning", "preference", "todo", "context"]},
+                "type": {
+                    "type": "string",
+                    "enum": ["fact", "decision", "learning", "preference", "todo", "context"],
+                },
                 "category": {"type": "string", "description": "Delete all in this category"},
-                "older_than_days": {"type": "integer", "description": "Delete memories older than N days"},
+                "older_than_days": {
+                    "type": "integer",
+                    "description": "Delete memories older than N days",
+                },
             },
             "required": [],
         },
@@ -465,7 +575,11 @@ TOOL_DEFINITIONS = [
             "properties": {
                 "swarm_id": {"type": "string", "description": "Swarm to join"},
                 "agent_id": {"type": "string", "description": "Your unique agent identifier"},
-                "role": {"type": "string", "enum": ["coordinator", "worker", "observer"], "default": "worker"},
+                "role": {
+                    "type": "string",
+                    "enum": ["coordinator", "worker", "observer"],
+                    "default": "worker",
+                },
                 "capabilities": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["swarm_id", "agent_id"],
@@ -479,8 +593,14 @@ TOOL_DEFINITIONS = [
             "properties": {
                 "swarm_id": {"type": "string"},
                 "agent_id": {"type": "string"},
-                "resource_type": {"type": "string", "enum": ["file", "function", "module", "component", "other"]},
-                "resource_id": {"type": "string", "description": "Resource identifier (e.g., file path)"},
+                "resource_type": {
+                    "type": "string",
+                    "enum": ["file", "function", "module", "component", "other"],
+                },
+                "resource_id": {
+                    "type": "string",
+                    "description": "Resource identifier (e.g., file path)",
+                },
                 "timeout_seconds": {"type": "integer", "default": 300},
             },
             "required": ["swarm_id", "agent_id", "resource_type", "resource_id"],
@@ -523,7 +643,10 @@ TOOL_DEFINITIONS = [
                 "agent_id": {"type": "string"},
                 "key": {"type": "string"},
                 "value": {"description": "Value to set (any JSON-serializable type)"},
-                "expected_version": {"type": "integer", "description": "Expected version for optimistic locking"},
+                "expected_version": {
+                    "type": "integer",
+                    "description": "Expected version for optimistic locking",
+                },
             },
             "required": ["swarm_id", "agent_id", "key", "value"],
         },
@@ -552,8 +675,16 @@ TOOL_DEFINITIONS = [
                 "agent_id": {"type": "string"},
                 "title": {"type": "string"},
                 "description": {"type": "string"},
-                "priority": {"type": "integer", "default": 0, "description": "Higher = more urgent"},
-                "depends_on": {"type": "array", "items": {"type": "string"}, "description": "Task IDs this depends on"},
+                "priority": {
+                    "type": "integer",
+                    "default": 0,
+                    "description": "Higher = more urgent",
+                },
+                "depends_on": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Task IDs this depends on",
+                },
                 "metadata": {"type": "object"},
             },
             "required": ["swarm_id", "agent_id", "title"],
@@ -595,7 +726,11 @@ TOOL_DEFINITIONS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "refresh": {"type": "boolean", "default": False, "description": "Force refresh from API"},
+                "refresh": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Force refresh from API",
+                },
             },
             "required": [],
         },
@@ -630,9 +765,121 @@ TOOL_DEFINITIONS = [
                     },
                     "description": "Documents to sync",
                 },
-                "delete_missing": {"type": "boolean", "default": False, "description": "Delete docs not in list"},
+                "delete_missing": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Delete docs not in list",
+                },
             },
             "required": ["documents"],
+        },
+    },
+    # Phase 12: RLM Orchestration Tools
+    {
+        "name": "rlm_load_document",
+        "description": "Load raw document content by file path. Returns the full unprocessed content of a single document for RLM-style exploration where the model navigates raw content directly.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Document path (e.g., 'docs/api.md')"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "rlm_load_project",
+        "description": "Load structured map of all project documents with content. Returns a token-budgeted dump of every file, with optional path filtering. Use for full-project exploration.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "max_tokens": {
+                    "type": "integer",
+                    "default": 16000,
+                    "description": "Total token budget for returned content",
+                },
+                "paths_filter": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Only include files matching these path prefixes (e.g., ['docs/', 'src/'])",
+                },
+                "include_content": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Include file content (false = metadata only)",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "rlm_orchestrate",
+        "description": "Multi-round context exploration in a single call. Performs: (1) section scan for project structure, (2) ranked search for top relevant sections, (3) raw file load for highest-scoring documents. Combines search intelligence with raw access.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The question or topic to explore"},
+                "max_tokens": {
+                    "type": "integer",
+                    "default": 16000,
+                    "description": "Token budget for raw file content",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "default": 5,
+                    "description": "Number of top sections to use for file selection",
+                },
+                "search_mode": {
+                    "type": "string",
+                    "enum": ["keyword", "semantic", "hybrid"],
+                    "default": "hybrid",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "rlm_repl_context",
+        "description": "Package project context for REPL consumption. Returns a structured dict of files and sections plus Python helper code (peek, grep, sections, files) ready for injection into an rlm-runtime REPL session via set_repl_context + execute_python. Optionally filter by a relevance query.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Optional query to filter context by relevance. If empty, loads files in order within budget.",
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "default": 8000,
+                    "description": "Token budget for file content",
+                },
+                "include_helpers": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Include Python helper code (peek, grep, sections, files) in setup_code",
+                },
+                "search_mode": {
+                    "type": "string",
+                    "enum": ["keyword", "semantic", "hybrid"],
+                    "default": "hybrid",
+                    "description": "Search mode when query is provided",
+                },
+            },
+            "required": [],
+        },
+    },
+    # Phase 14: Pass-by-Reference
+    {
+        "name": "rlm_get_chunk",
+        "description": "Retrieve full content by chunk ID. Use with rlm_context_query(return_references=True) to fetch full content of specific sections. This pass-by-reference pattern reduces hallucination by maintaining clear source attribution.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "chunk_id": {
+                    "type": "string",
+                    "description": "The chunk ID from rlm_context_query results (when return_references=True)",
+                },
+            },
+            "required": ["chunk_id"],
         },
     },
 ]
@@ -681,7 +928,9 @@ def jsonrpc_error(id: Any, code: int, message: str) -> dict:
 # ============ REQUEST VALIDATION ============
 
 
-async def validate_request(project_id_or_slug: str, api_key: str) -> tuple[dict | None, Plan, str | None, str | None]:
+async def validate_request(
+    project_id_or_slug: str, api_key: str, client_ip: str | None = None
+) -> tuple[dict | None, Plan, str | None, str | None]:
     """
     Validate authentication and check usage limits.
 
@@ -710,12 +959,22 @@ async def validate_request(project_id_or_slug: str, api_key: str) -> tuple[dict 
     if api_key.startswith("snipara_at_"):
         auth_info = await validate_oauth_token(api_key, project_id_or_slug)
         if not auth_info:
-            return None, Plan.FREE, "Invalid or expired OAuth token. Re-authenticate at https://snipara.com/dashboard or run /snipara:quickstart", None
+            return (
+                None,
+                Plan.FREE,
+                "Invalid or expired OAuth token. Re-authenticate at https://snipara.com/dashboard or run /snipara:quickstart",
+                None,
+            )
     else:
         # Fall back to API key validation
         auth_info = await validate_api_key(api_key, project_id_or_slug)
         if not auth_info:
-            return None, Plan.FREE, "Invalid API key. Get a free key at https://snipara.com/dashboard (100 queries/month, no credit card)", None
+            return (
+                None,
+                Plan.FREE,
+                "Invalid API key. Get a free key at https://snipara.com/dashboard (100 queries/month, no credit card)",
+                None,
+            )
 
     project = await get_project_with_team(project_id_or_slug)
     if not project:
@@ -724,14 +983,16 @@ async def validate_request(project_id_or_slug: str, api_key: str) -> tuple[dict 
     # Use actual database ID for all operations
     actual_project_id = project.id
 
-    if not await check_rate_limit(auth_info["id"]):
+    if not await check_rate_limit(auth_info["id"], client_ip=client_ip):
         log_security_event(
-            "rate_limit.exceeded", "api_key", auth_info["id"],
+            "rate_limit.exceeded",
+            "api_key",
+            auth_info["id"],
             auth_info.get("user_id", auth_info["id"]),
         )
         return None, Plan.FREE, f"Rate limit exceeded: {settings.rate_limit_requests}/min", None
 
-    plan = Plan(project.team.subscription.plan if project.team.subscription else "FREE")
+    plan = get_effective_plan(project.team.subscription if project.team else None)
     limits = await check_usage_limits(actual_project_id, plan)
     if limits.exceeded:
         return None, plan, f"Monthly limit exceeded: {limits.current}/{limits.max}", None
@@ -772,18 +1033,31 @@ async def handle_call_tool(id: Any, params: dict, project_id: str, plan: Plan) -
         result = await engine.execute(tool_enum, arguments)
 
         await track_usage(
-            project_id=project_id, tool=tool_name,
-            input_tokens=result.input_tokens, output_tokens=result.output_tokens,
-            latency_ms=0, success=True,
+            project_id=project_id,
+            tool=tool_name,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            latency_ms=0,
+            success=True,
         )
 
-        return jsonrpc_response(id, {
-            "content": [{"type": "text", "text": json.dumps(result.data, indent=2, default=str)}],
-        })
+        return jsonrpc_response(
+            id,
+            {
+                "content": [
+                    {"type": "text", "text": json.dumps(result.data, indent=2, default=str)}
+                ],
+            },
+        )
     except Exception as e:
         await track_usage(
-            project_id=project_id, tool=tool_name,
-            input_tokens=0, output_tokens=0, latency_ms=0, success=False, error=str(e),
+            project_id=project_id,
+            tool=tool_name,
+            input_tokens=0,
+            output_tokens=0,
+            latency_ms=0,
+            success=False,
+            error=str(e),
         )
         return jsonrpc_error(id, -32000, str(e))
 
@@ -814,11 +1088,14 @@ async def handle_request(body: dict, project_id: str, plan: Plan) -> dict | None
         return None
 
     if method == "initialize":
-        return jsonrpc_response(id, {
-            "protocolVersion": MCP_VERSION,
-            "serverInfo": {"name": "snipara", "version": "1.0.0"},
-            "capabilities": {"tools": {}},
-        })
+        return jsonrpc_response(
+            id,
+            {
+                "protocolVersion": MCP_VERSION,
+                "serverInfo": {"name": "snipara", "version": "1.0.0"},
+                "capabilities": {"tools": {}},
+            },
+        )
     elif method == "tools/list":
         return jsonrpc_response(id, {"tools": TOOL_DEFINITIONS})
     elif method == "tools/call":
@@ -871,7 +1148,8 @@ async def mcp_endpoint(
             ),
         )
 
-    api_key_info, plan, error, actual_project_id = await validate_request(project_id, api_key)
+    client_ip = _get_client_ip(request)
+    api_key_info, plan, error, actual_project_id = await validate_request(project_id, api_key, client_ip=client_ip)
     if error:
         raise HTTPException(status_code=401 if "Invalid" in error else 429, detail=error)
 
@@ -892,6 +1170,7 @@ async def mcp_endpoint(
 @router.get("/{project_id}")
 async def mcp_sse(
     project_id: str,
+    request: Request,
     x_api_key: str | None = Header(None, alias="X-API-Key"),
     authorization: str | None = Header(None),
 ):
@@ -928,12 +1207,14 @@ async def mcp_sse(
             ),
         )
 
-    _, _, error, _ = await validate_request(project_id, api_key)
+    client_ip = _get_client_ip(request)
+    _, _, error, _ = await validate_request(project_id, api_key, client_ip=client_ip)
     if error:
         raise HTTPException(status_code=401, detail=error)
 
     async def stream():
         import asyncio
+
         yield f"data: {json.dumps({'type': 'connected'})}\n\n"
         try:
             while True:
@@ -942,4 +1223,8 @@ async def mcp_sse(
         except asyncio.CancelledError:
             pass
 
-    return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive"})
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )

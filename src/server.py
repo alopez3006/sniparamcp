@@ -1068,41 +1068,6 @@ async def get_stats(
     return {"project_id": project_id, **stats}
 
 
-@app.post("/v1/{project_id}/reindex", tags=["MCP"])
-async def reindex_project(
-    project_id: str,
-    api_key: Annotated[str, Depends(get_api_key)],
-):
-    """
-    Trigger re-indexing of all documents in a project.
-
-    This creates/updates document chunks and embeddings for semantic search.
-    Call this after GitHub sync or bulk document uploads to ensure
-    all content is properly indexed for search.
-    """
-    from services.indexer import DocumentIndexer
-
-    # Validate API key and get project
-    _, _, _, _ = await validate_and_rate_limit(project_id, api_key)
-
-    db = await get_db()
-    indexer = DocumentIndexer(db)
-
-    try:
-        results = await indexer.index_project(project_id)
-        total_chunks = sum(results.values())
-        return {
-            "success": True,
-            "project_id": project_id,
-            "documents_indexed": len(results),
-            "chunks_created": total_chunks,
-            "details": results,
-        }
-    except Exception as e:
-        logger.error(f"Reindex failed for {project_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Reindex failed: {str(e)}")
-
-
 # ============ MEMORY REST API (Automation Hooks) ============
 
 

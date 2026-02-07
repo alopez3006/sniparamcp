@@ -58,19 +58,45 @@ async def close_redis() -> None:
     _redis_available = None
 
 
-async def check_rate_limit(api_key_id: str) -> bool:
+def _is_demo_key(api_key_id: str) -> bool:
+    """Check if an API key ID is a demo key (public, stricter limits)."""
+    if not settings.demo_api_key_ids:
+        return False
+    demo_ids = {kid.strip() for kid in settings.demo_api_key_ids.split(",") if kid.strip()}
+    return api_key_id in demo_ids
+
+
+def _get_rate_limit_for_key(api_key_id: str) -> tuple[int, int]:
+    """Return (max_requests, window_seconds) for the given key."""
+    if _is_demo_key(api_key_id):
+        return settings.demo_rate_limit_requests, settings.demo_rate_limit_window
+    return settings.rate_limit_requests, settings.rate_limit_window
+
+
+async def check_rate_limit(api_key_id: str, client_ip: str | None = None) -> bool:
     """
     Check if the API key has exceeded rate limits.
 
     Uses Redis when available, falls back to in-memory sliding window.
+    Demo keys use stricter per-IP limits (configured via DEMO_API_KEY_IDS).
 
     Args:
         api_key_id: The API key ID
+        client_ip: Optional client IP for per-IP demo rate limiting
 
     Returns:
         True if within limits, False if exceeded
     """
     global _fallback_warning_logged
+
+    max_requests, window = _get_rate_limit_for_key(api_key_id)
+
+    # Demo keys: rate limit per IP instead of per key (since key is public)
+    is_demo = _is_demo_key(api_key_id)
+    if is_demo and client_ip:
+        rate_key_id = f"demo_ip:{client_ip}"
+    else:
+        rate_key_id = api_key_id
 
     r = await get_redis()
 
@@ -79,21 +105,22 @@ async def check_rate_limit(api_key_id: str) -> bool:
         if settings.rate_limit_fail_closed:
             logger.error("Redis unavailable and rate_limit_fail_closed=True - rejecting request")
             return False
-        return _check_rate_limit_memory(api_key_id)
+        return _check_rate_limit_memory(rate_key_id, max_requests, window)
 
     try:
-        key = f"rate_limit:{api_key_id}"
+        key = f"rate_limit:{rate_key_id}"
 
         # Get current count
         count = await r.get(key)
         if count is None:
             # First request, set counter with expiry
-            await r.setex(key, settings.rate_limit_window, 1)
+            await r.setex(key, window, 1)
             return True
 
         count = int(count)
-        if count >= settings.rate_limit_requests:
-            logger.warning(f"Rate limit exceeded for {api_key_id[:8]}...")
+        if count >= max_requests:
+            label = f"demo IP {client_ip}" if is_demo else f"{api_key_id[:8]}..."
+            logger.warning(f"Rate limit exceeded for {label}")
             return False
 
         # Increment counter
@@ -104,10 +131,14 @@ async def check_rate_limit(api_key_id: str) -> bool:
         logger.error(f"Redis rate limit check failed: {e}")
         if settings.rate_limit_fail_closed:
             return False
-        return _check_rate_limit_memory(api_key_id)
+        return _check_rate_limit_memory(rate_key_id, max_requests, window)
 
 
-def _check_rate_limit_memory(api_key_id: str) -> bool:
+def _check_rate_limit_memory(
+    rate_key_id: str,
+    max_requests: int | None = None,
+    window_seconds: int | None = None,
+) -> bool:
     """
     In-memory rate limit check (fallback).
 
@@ -115,7 +146,9 @@ def _check_rate_limit_memory(api_key_id: str) -> bool:
     won't work correctly with multiple server instances.
 
     Args:
-        api_key_id: The API key ID
+        rate_key_id: The rate limit key (API key ID or demo IP key)
+        max_requests: Override for max requests (defaults to settings)
+        window_seconds: Override for window (defaults to settings)
 
     Returns:
         True if within limits, False if exceeded
@@ -130,15 +163,19 @@ def _check_rate_limit_memory(api_key_id: str) -> bool:
         )
         _fallback_warning_logged = True
 
+    if max_requests is None:
+        max_requests = settings.rate_limit_requests
+    if window_seconds is None:
+        window_seconds = settings.rate_limit_window
+
     now = time.time()
-    window_seconds = settings.rate_limit_window
-    window = _local_rate_limits[api_key_id]
+    window = _local_rate_limits[rate_key_id]
 
     # Remove expired entries (sliding window)
     window[:] = [t for t in window if now - t < window_seconds]
 
-    if len(window) >= settings.rate_limit_requests:
-        logger.warning(f"Rate limit exceeded for {api_key_id[:8]}... (in-memory)")
+    if len(window) >= max_requests:
+        logger.warning(f"Rate limit exceeded for {rate_key_id[:8]}... (in-memory)")
         return False
 
     window.append(now)

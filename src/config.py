@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     rate_limit_requests: int = 100  # requests per minute per API key
     rate_limit_window: int = 60  # seconds
 
+    # Demo key rate limiting (stricter, public key)
+    demo_api_key_ids: str = ""  # comma-separated DB IDs of demo API keys
+    demo_rate_limit_requests: int = 5  # requests per minute per IP for demo keys
+    demo_rate_limit_window: int = 60  # seconds
+
     # IP-based rate limiting (secondary layer)
     ip_rate_limit_requests: int = 300  # requests per window per IP
     ip_rate_limit_window: int = 60  # seconds
