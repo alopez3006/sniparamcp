@@ -53,7 +53,7 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
-ignore = ["E501"]
+ignore = ["E501", "UP042"]
 
 [project.scripts]
 snipara-benchmark = "benchmarks.runner:main"
