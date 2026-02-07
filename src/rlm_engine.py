@@ -395,6 +395,35 @@ LOW_CONFIDENCE_SCORE_THRESHOLD = 15.0
 # Token budget expansion factor when confidence is low
 LOW_CONFIDENCE_TOKEN_MULTIPLIER = 1.5
 
+# Internal/debug path patterns - sections from these paths get score penalties
+# because they contain project internals, debug logs, and session data that
+# shouldn't rank above actual documentation.
+_INTERNAL_PATH_PATTERNS = (
+    ".claude/",       # Claude session files, commands, debug logs
+    ".github/",       # GitHub-specific config files
+    ".git/",          # Git internals
+    ".vscode/",       # VS Code settings
+    "node_modules/",  # Dependencies
+    "__pycache__/",   # Python cache
+    "debug",          # Files containing "debug" in path
+    "session",        # Session logs
+)
+# Score multiplier for sections from internal paths (0.1 = 90% penalty)
+_INTERNAL_PATH_PENALTY = 0.1
+
+
+def _is_internal_path(file_path: str) -> bool:
+    """Check if a file path matches internal/debug patterns that should be deprioritized.
+
+    Internal files like .claude/commands/debug.md contain session logs and debugging
+    info that can pollute search results when they match common query terms.
+    """
+    if not file_path:
+        return False
+    path_lower = file_path.lower()
+    return any(pattern in path_lower for pattern in _INTERNAL_PATH_PATTERNS)
+
+
 # First-query tool tips - injected only on the first query of a session
 # This helps users understand all available tools without wasting tokens on every query
 # Tips are plan-filtered: users only see tools available to their plan
@@ -1971,6 +2000,24 @@ class RLMEngine:
                 if final_score > 3:  # ~3 % of max score
                     scored.append((section, final_score))
 
+        # Apply internal path penalty before sorting
+        # Sections from internal/debug paths (like .claude/commands/debug.md)
+        # get their scores reduced to prevent them from ranking above real docs.
+        if self.index and scored:
+            penalized: list[tuple[Section, float]] = []
+            for section, score in scored:
+                file_path = self._find_file_for_section(section)
+                if _is_internal_path(file_path):
+                    penalized_score = score * _INTERNAL_PATH_PENALTY
+                    logger.debug(
+                        f"Penalizing internal file section: '{section.title}' "
+                        f"({file_path}) {score:.1f} → {penalized_score:.1f}"
+                    )
+                    penalized.append((section, penalized_score))
+                else:
+                    penalized.append((section, score))
+            scored = penalized
+
         # Sort by score descending
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored
@@ -2251,15 +2298,18 @@ class RLMEngine:
         return result
 
     def _find_file_for_section(self, section: Section) -> str:
-        """Find which file a section belongs to based on line numbers."""
+        """Find which file a section belongs to based on line numbers.
+
+        Uses file_boundaries for precise lookup: section line numbers are matched
+        against the (start, end) ranges tracked during indexing.
+        """
         if not self.index:
             return "unknown"
 
-        cumulative_lines = 0
-        for file_path in self.index.files:
-            # This is a simplified approach - in production, we'd track
-            # file boundaries more precisely during parsing
-            if section.start_line > cumulative_lines:
+        # Use file_boundaries for precise mapping (line numbers are 1-indexed in sections)
+        for file_path, (start, end) in self.index.file_boundaries.items():
+            # start/end are 0-indexed, section lines are 1-indexed
+            if start + 1 <= section.start_line <= end:
                 return file_path
 
         return self.index.files[-1] if self.index.files else "unknown"
