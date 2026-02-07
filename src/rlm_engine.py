@@ -92,19 +92,32 @@ from .services.swarm_events import (
 # above actual pricing content because "what" and "are" get 5x title weight.
 # ---------------------------------------------------------------------------
 _STOP_WORDS = frozenset({
+    # Articles, auxiliaries, modals
     "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
     "have", "has", "had", "do", "does", "did", "will", "would", "could",
     "should", "may", "might", "shall", "can", "need",
+    # Prepositions
     "to", "of", "in", "for", "on", "with", "at", "by", "from", "as",
     "into", "through", "during", "before", "after", "above", "below",
     "between", "out", "off", "over", "under", "again", "further",
+    # Adverbs and conjunctions
     "then", "once", "here", "there", "when", "where", "why", "how",
     "all", "both", "each", "few", "more", "most", "other", "some",
     "such", "no", "nor", "not", "only", "own", "same", "so", "than",
     "too", "very", "just", "because", "but", "and", "or", "if",
+    # Pronouns and determiners
     "what", "which", "who", "whom", "this", "that", "these", "those",
     "it", "its", "my", "your", "his", "her", "our", "their", "about",
     "up", "also", "any", "many", "much",
+    # Generic nouns that appear in many queries but aren't distinctive
+    "value", "proposition", "core", "main", "key", "primary",
+    "work", "works", "working", "feature", "features",
+    "thing", "things", "something", "everything",
+    # Common verbs that don't add search value
+    "use", "used", "using", "get", "gets", "getting",
+    "make", "makes", "making", "see", "sees", "seeing",
+    "know", "knows", "knowing", "think", "thinks",
+    "want", "wants", "wanting", "like", "likes",
 })
 
 
@@ -164,6 +177,18 @@ _HYBRID_SEMANTIC_HEAVY = (0.25, 0.75)  # conceptual / how-why queries (was 0.30/
 # Higher k smooths rankings, improving recall.
 _RRF_K = 45  # Reduced from 60 for better precision while keeping good recall
 
+# Generic title terms — these get reduced title weight (1.5x instead of 5x)
+# because they appear in many unrelated sections and cause false matches.
+# E.g., "Snipara tools not available" ranks highly for "What tools does Snipara expose?"
+# because "snipara" + "tools" match the title even though it's a debugging section.
+_GENERIC_TITLE_TERMS = frozenset({
+    "snipara", "rlm", "mcp",  # Project-specific but ubiquitous
+    "tools", "tool", "guide", "reference", "overview", "docs",  # Generic doc terms
+    "how", "what", "when", "where", "why",  # Question words (shouldn't boost titles)
+    "using", "use", "get", "set", "run", "make",  # Common verbs
+    "available", "not", "error", "issue", "troubleshoot",  # Debugging terms
+})
+
 # Query terms that signal structured/factual content (keyword-friendly)
 _SPECIFIC_QUERY_TERMS = frozenset(
     {
@@ -190,7 +215,9 @@ _SPECIFIC_QUERY_TERMS = frozenset(
 )
 
 # Conceptual query prefixes (semantic-friendly)
+# These trigger semantic-heavy weights (25/75) for better conceptual matching
 _CONCEPTUAL_PREFIXES = (
+    # How/Why questions
     "how does",
     "how do",
     "how is",
@@ -200,12 +227,25 @@ _CONCEPTUAL_PREFIXES = (
     "why do",
     "why is",
     "why are",
+    # What questions (conceptual, not factual lookups)
+    "what is",
+    "what are",
+    "what does",
+    "what do",
+    # Explanation requests
     "explain",
     "describe",
     "compare",
+    "tell me about",
+    "overview of",
+    # Specific conceptual patterns
     "what happens when",
     "what is the difference",
     "what are the tradeoffs",
+    "value proposition",
+    "core value",
+    "main purpose",
+    "key features",
 )
 
 # Plans that have access to semantic search features
@@ -1972,7 +2012,7 @@ class RLMEngine:
 
             stem = _stem_keyword(keyword)
 
-            # Title matches (5x weight, not length-normalized)
+            # Title matches — reduced weight for generic terms
             title_count = title_lower.count(keyword)
             # Fall back to stem match for morphological variants
             # e.g. "prices" (stem "pric") matches title containing "pricing"
@@ -1980,7 +2020,13 @@ class RLMEngine:
                 title_count = title_lower.count(stem)
             if title_count > 0:
                 title_keyword_hits += 1
-            score += title_count * 5.0
+                # Generic terms get 1.5x weight, specific terms get 5x
+                # This prevents "Snipara tools not available" ranking above
+                # actual tool documentation for "What tools does Snipara expose?"
+                if keyword in _GENERIC_TITLE_TERMS or stem in _GENERIC_TITLE_TERMS:
+                    score += title_count * 1.5
+                else:
+                    score += title_count * 5.0
 
             # Content matches (length-normalized)
             content_count = content_lower.count(keyword)
