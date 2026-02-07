@@ -1412,7 +1412,10 @@ class RLMEngine:
         Returns:
             ToolResult with ContextQueryResult containing ranked sections
         """
-        query = params.get("query", "")
+        original_query = params.get("query", "")
+        # Expand abstract queries with concrete keywords for better search recall
+        query = _expand_query(original_query)
+
         # Use dashboard settings as defaults, allow request params to override
         max_tokens = params.get("max_tokens", self.settings.max_tokens_per_query)
         search_mode_str = params.get("search_mode", self.settings.search_mode)
@@ -1638,6 +1641,23 @@ class RLMEngine:
         # for the downstream LLM (e.g., 35 sections for a simple definition query).
         max_sections = 15
         scored_sections = scored_sections[:max_sections]
+
+        # ---- Minimum sections for abstract queries ----
+        # Abstract queries need more context to prevent hallucination. If we have
+        # fewer sections than the minimum, boost the token budget to ensure we can
+        # include at least ABSTRACT_QUERY_MIN_SECTIONS.
+        is_abstract = _is_abstract_query(original_query)
+        if is_abstract and len(scored_sections) >= ABSTRACT_QUERY_MIN_SECTIONS:
+            # Estimate tokens needed for minimum sections
+            avg_tokens_per_section = 400  # Conservative estimate
+            min_budget_needed = ABSTRACT_QUERY_MIN_SECTIONS * avg_tokens_per_section
+            if max_tokens < min_budget_needed:
+                logger.info(
+                    f"Abstract query detected, boosting budget for min {ABSTRACT_QUERY_MIN_SECTIONS} sections: "
+                    f"{max_tokens} → {min_budget_needed}"
+                )
+                max_tokens = min_budget_needed
+                remaining_budget = max(remaining_budget, min_budget_needed - shared_context_tokens)
 
         # ---- Title + content dedup ----
         # Two-pass deduplication:
