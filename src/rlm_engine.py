@@ -170,7 +170,7 @@ def _stem_keyword(word: str) -> str:
 # When query is conceptual (how/why/explain), boost semantic weight.
 _HYBRID_KEYWORD_HEAVY = (0.60, 0.40)  # factual / title-match queries (was 0.70/0.30)
 _HYBRID_BALANCED = (0.40, 0.60)  # default - favor semantic for better recall (was 0.50/0.50)
-_HYBRID_SEMANTIC_HEAVY = (0.25, 0.75)  # conceptual / how-why queries (was 0.30/0.70)
+_HYBRID_SEMANTIC_HEAVY = (0.15, 0.85)  # conceptual / how-why queries - heavily semantic
 
 # Reciprocal Rank Fusion constant (k=60 is the standard from Cormack+ 2009).
 # Lower k gives more weight to top-ranked results, improving precision.
@@ -2192,12 +2192,15 @@ class RLMEngine:
         # Signal 3: conceptual query pattern
         is_conceptual = any(query_lower.startswith(p) for p in _CONCEPTUAL_PREFIXES)
 
+        # Conceptual queries take priority - semantic search is better at finding
+        # answers to "what is X?" even when there are strong keyword matches on
+        # generic terms like project names.
+        if is_conceptual and not has_specific:
+            return _HYBRID_SEMANTIC_HEAVY
         if strong_keyword and has_specific:
             return _HYBRID_KEYWORD_HEAVY
         if strong_keyword:
-            return _HYBRID_KEYWORD_HEAVY
-        if is_conceptual and not has_specific:
-            return _HYBRID_SEMANTIC_HEAVY
+            return _HYBRID_BALANCED  # Don't go full keyword-heavy without specific terms
         return _HYBRID_BALANCED
 
     @staticmethod
