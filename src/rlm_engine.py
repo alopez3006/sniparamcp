@@ -401,22 +401,29 @@ Do NOT read files directly when Snipara can provide the context more efficiently
 ---
 """
 
-# Grounding instructions added when confidence is low to prevent hallucination
+# Grounding instructions - ALWAYS included to prevent hallucination
+# This is the #1 lever for reducing hallucination rate
 GROUNDING_INSTRUCTIONS = """
-## IMPORTANT: Grounding Rules
+## CRITICAL: Grounding Rules (MUST FOLLOW)
 
-The context provided may not contain the complete answer. Follow these rules:
+**You MUST follow these rules to avoid hallucination:**
 
-1. **ONLY answer based on the provided context.** Do not invent or assume information.
-2. If the answer is NOT clearly stated in the context, say: "I don't have enough information to answer this accurately."
-3. If you're uncertain, ask the user to run `rlm_decompose` to break down the question.
-4. Prefer saying "I don't know" over making up facts.
+1. **ONLY use facts explicitly stated in the context above.** Never invent, assume, or extrapolate.
+2. **If unsure, say "Based on the provided context, I cannot confirm..."** - this is ALWAYS better than guessing.
+3. **For lists (tools, features, prices):** Only list items explicitly mentioned. Do NOT add items that "might" exist.
+4. **For architecture/design questions:** Only describe what's explicitly documented. Say "the documentation doesn't specify" for gaps.
+5. **When context seems incomplete:** Suggest the user run `rlm_decompose` or increase `max_tokens`.
+
+**Remember:** The user would rather hear "I don't have that information" than receive incorrect facts.
 
 ---
 """
 
 # Minimum token budget for conceptual queries (to reduce hallucination)
 CONCEPTUAL_QUERY_MIN_TOKENS = 4000
+# Minimum sections for conceptual queries (architecture, how-does, explain)
+# Too few sections = LLM fills gaps with guesses = hallucination
+CONCEPTUAL_QUERY_MIN_SECTIONS = 5
 # Score threshold below which we consider results "low confidence"
 LOW_CONFIDENCE_SCORE_THRESHOLD = 15.0
 # Token budget expansion factor when confidence is low
@@ -1797,6 +1804,35 @@ class RLMEngine:
                 if len(suggestions) < 5:
                     suggestions.append(f"{section.title} (score: {score:.1f})")
 
+        # ---- Minimum sections for conceptual queries ----
+        # If this is a conceptual query but we have too few sections, the LLM
+        # will fill gaps with guesses = hallucination. Force include more sections
+        # even if budget is tight. Better to exceed budget than hallucinate.
+        if is_conceptual_query and len(selected_sections) < CONCEPTUAL_QUERY_MIN_SECTIONS:
+            sections_needed = CONCEPTUAL_QUERY_MIN_SECTIONS - len(selected_sections)
+            logger.warning(
+                f"Conceptual query has only {len(selected_sections)} sections, "
+                f"need {CONCEPTUAL_QUERY_MIN_SECTIONS}. Adding {sections_needed} more."
+            )
+            # Find sections not yet selected
+            selected_titles = {s.title for s in selected_sections}
+            for section, score in scored_sections:
+                if section.title not in selected_titles and sections_needed > 0:
+                    file_path = self._find_file_for_section(section)
+                    section_tokens = count_tokens(section.content)
+                    selected_sections.append(
+                        ContextSection(
+                            title=section.title,
+                            content=section.content,
+                            file=file_path,
+                            lines=[section.start_line, section.end_line],
+                            relevance_score=min(score / 100.0, 1.0),
+                            token_count=section_tokens,
+                        )
+                    )
+                    total_tokens += section_tokens
+                    sections_needed -= 1
+
         # ---- Hard cap: enforce max_tokens guarantee ----
         # The greedy loop above *should* stay within budget, but shared
         # context allocation, session context, and rounding during truncation
@@ -1818,10 +1854,12 @@ class RLMEngine:
         # Include system instructions (custom from project or default)
         instructions = self.settings.system_instructions or DEFAULT_SYSTEM_INSTRUCTIONS
 
-        # Add grounding instructions when confidence is low to prevent hallucination
+        # ALWAYS add grounding instructions to prevent hallucination
+        # This is the #1 lever for reducing hallucination - benchmarks show
+        # that explicit grounding rules significantly reduce false claims
+        instructions = instructions + GROUNDING_INSTRUCTIONS
         if low_confidence:
-            instructions = instructions + GROUNDING_INSTRUCTIONS
-            logger.info("Added grounding instructions due to low confidence results")
+            logger.info("Low confidence results - grounding instructions especially important")
 
         # Smart routing: analyze query and recommend execution mode
         routing_decision = route_query(query, context_tokens=total_tokens)
