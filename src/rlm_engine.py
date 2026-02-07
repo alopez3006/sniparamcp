@@ -20,10 +20,12 @@ from .db import get_db
 from .models import (
     ContextQueryResult,
     ContextSection,
+    ContextSectionRef,
     DecomposeResult,
     DecomposeStrategy,
     DeleteSummaryResult,
     DocumentCategoryEnum,
+    GetChunkResult,
     GetSummariesResult,
     GetTemplateResult,
     ListTemplatesResult,
@@ -170,7 +172,7 @@ def _stem_keyword(word: str) -> str:
 # When query is conceptual (how/why/explain), boost semantic weight.
 _HYBRID_KEYWORD_HEAVY = (0.60, 0.40)  # factual / title-match queries (was 0.70/0.30)
 _HYBRID_BALANCED = (0.40, 0.60)  # default - favor semantic for better recall (was 0.50/0.50)
-_HYBRID_SEMANTIC_HEAVY = (0.15, 0.85)  # conceptual / how-why queries - heavily semantic
+_HYBRID_SEMANTIC_HEAVY = (0.25, 0.75)  # conceptual / how-why queries
 
 # Reciprocal Rank Fusion constant (k=60 is the standard from Cormack+ 2009).
 # Lower k gives more weight to top-ranked results, improving precision.
@@ -303,6 +305,8 @@ READ_TOOLS = {
     ToolName.RLM_ORCHESTRATE,
     # Phase 13: REPL Context Bridge
     ToolName.RLM_REPL_CONTEXT,
+    # Phase 14: Pass-by-Reference
+    ToolName.RLM_GET_CHUNK,
 }
 
 # WRITE_TOOLS: Available to EDITOR and above
@@ -574,6 +578,9 @@ class RLMEngine:
         self.session_context: str = ""
         self._chunks_available: bool | None = None  # Cache for chunk availability check
         self._tips_shown_this_session: bool = False  # Track if first-query tips were shown
+        # Pass-by-reference chunk cache: chunk_id -> (section, file_path, score)
+        # This enables rlm_get_chunk to retrieve full content by ID
+        self._chunk_cache: dict[str, tuple[Section, str, float, float, float]] = {}
 
         # Load settings from dashboard config or use defaults
         if settings:
@@ -586,6 +593,53 @@ class RLMEngine:
             )
         else:
             self.settings = ProjectSettings()
+
+    def _generate_chunk_id(self, section_id: str) -> str:
+        """Generate a unique chunk ID for pass-by-reference retrieval.
+
+        The chunk ID is a hash of project_id + section_id, ensuring uniqueness
+        across projects while being deterministic for the same section.
+        """
+        key = f"{self.project_id}:{section_id}"
+        return f"chunk_{hashlib.md5(key.encode()).hexdigest()[:12]}"
+
+    def _cache_chunk(
+        self,
+        section: "Section",
+        file_path: str,
+        score: float,
+        keyword_score: float = 0.0,
+        semantic_score: float = 0.0,
+    ) -> str:
+        """Cache a section for later retrieval via rlm_get_chunk.
+
+        Returns the chunk_id for referencing this section.
+        """
+        chunk_id = self._generate_chunk_id(section.id)
+        self._chunk_cache[chunk_id] = (section, file_path, score, keyword_score, semantic_score)
+        return chunk_id
+
+    def get_chunk(self, chunk_id: str) -> dict[str, Any] | None:
+        """Retrieve a cached chunk by ID for rlm_get_chunk tool.
+
+        Returns None if the chunk is not found (e.g., from a different session).
+        """
+        cached = self._chunk_cache.get(chunk_id)
+        if not cached:
+            return None
+
+        section, file_path, score, kw_score, sem_score = cached
+        return {
+            "chunk_id": chunk_id,
+            "title": section.title,
+            "content": section.content,
+            "file": file_path,
+            "lines": (section.start_line, section.end_line),
+            "token_count": count_tokens(section.content),
+            "relevance_score": min(score / 100.0, 1.0),
+            "keyword_score": kw_score,
+            "semantic_score": sem_score,
+        }
 
     async def load_documents(self) -> None:
         """Load and index project documents from database."""
@@ -931,6 +985,8 @@ class RLMEngine:
             ToolName.RLM_ORCHESTRATE: self._handle_orchestrate,
             # Phase 13: REPL Context Bridge
             ToolName.RLM_REPL_CONTEXT: self._handle_repl_context,
+            # Phase 14: Pass-by-Reference
+            ToolName.RLM_GET_CHUNK: self._handle_get_chunk,
         }
 
         handler = handlers.get(tool)
@@ -1370,6 +1426,9 @@ class RLMEngine:
         prefer_summaries = params.get("prefer_summaries", self.settings.include_summaries)
         include_shared_context = params.get("include_shared_context", True)
         shared_context_budget_percent = params.get("shared_context_budget_percent", 30)
+        # Pass-by-reference mode: return chunk IDs + previews instead of full content
+        # This reduces hallucination by maintaining clear source attribution
+        return_references = params.get("return_references", False)
 
         # Detect conceptual queries and boost token budget to reduce hallucination
         query_lower = query.lower()
@@ -1744,9 +1803,62 @@ class RLMEngine:
         # Smart routing: analyze query and recommend execution mode
         routing_decision = route_query(query, context_tokens=total_tokens)
 
+        # Pass-by-reference mode: convert sections to chunk references
+        section_refs: list[ContextSectionRef] = []
+        preview_tokens = 0
+
+        if return_references:
+            # Build chunk references instead of returning full content
+            # This reduces hallucination by:
+            # 1. Limiting what the LLM sees (previews only)
+            # 2. Requiring explicit chunk retrieval for details
+            # 3. Maintaining clear source attribution via chunk_id
+            for section in all_sections:
+                # Generate preview (first ~100 chars)
+                preview = section.content[:100].strip()
+                if len(section.content) > 100:
+                    preview += "..."
+
+                # Cache the full content for later retrieval
+                chunk_id = self._cache_chunk(
+                    section=Section(
+                        id=hashlib.md5(f"{section.file}:{section.title}".encode()).hexdigest()[:12],
+                        title=section.title,
+                        content=section.content,
+                        start_line=section.lines[0],
+                        end_line=section.lines[1],
+                        level=1,
+                        parent_titles=[],
+                    ),
+                    file_path=section.file,
+                    score=section.relevance_score * 100,
+                    keyword_score=0.0,  # Not tracked in ContextSection
+                    semantic_score=0.0,
+                )
+
+                section_refs.append(ContextSectionRef(
+                    chunk_id=chunk_id,
+                    title=section.title,
+                    preview=preview,
+                    file=section.file,
+                    lines=section.lines,
+                    relevance_score=section.relevance_score,
+                    token_count=section.token_count,
+                    keyword_score=0.0,
+                    semantic_score=0.0,
+                ))
+                preview_tokens += count_tokens(preview)
+
+            logger.info(
+                f"Pass-by-reference mode: {len(section_refs)} chunks cached, "
+                f"{preview_tokens} preview tokens (vs {total_tokens} full tokens)"
+            )
+
         result = ContextQueryResult(
-            sections=all_sections,
-            total_tokens=total_tokens,
+            sections=[] if return_references else all_sections,
+            section_refs=section_refs if return_references else [],
+            references_mode=return_references,
+            total_tokens=preview_tokens if return_references else total_tokens,
             max_tokens=max_tokens,
             query=query,
             search_mode=search_mode,
@@ -2192,15 +2304,13 @@ class RLMEngine:
         # Signal 3: conceptual query pattern
         is_conceptual = any(query_lower.startswith(p) for p in _CONCEPTUAL_PREFIXES)
 
-        # Conceptual queries take priority - semantic search is better at finding
-        # answers to "what is X?" even when there are strong keyword matches on
-        # generic terms like project names.
-        if is_conceptual and not has_specific:
-            return _HYBRID_SEMANTIC_HEAVY
+        # Priority: specific keyword matches first, then conceptual patterns
         if strong_keyword and has_specific:
             return _HYBRID_KEYWORD_HEAVY
         if strong_keyword:
             return _HYBRID_BALANCED  # Don't go full keyword-heavy without specific terms
+        if is_conceptual:
+            return _HYBRID_SEMANTIC_HEAVY
         return _HYBRID_BALANCED
 
     @staticmethod
@@ -5074,4 +5184,72 @@ def files():
             data=response,
             input_tokens=count_tokens(query) if query else 0,
             output_tokens=total_tokens,
+        )
+
+    # ============ PHASE 14: PASS-BY-REFERENCE HANDLERS ============
+
+    async def _handle_get_chunk(self, params: dict[str, Any]) -> ToolResult:
+        """
+        Handle rlm_get_chunk - retrieve full content by chunk ID.
+
+        This tool is used with pass-by-reference mode of rlm_context_query.
+        When return_references=True, rlm_context_query returns chunk IDs and
+        previews. Use this tool to retrieve the full content of specific chunks.
+
+        Args:
+            params: Dict containing:
+                - chunk_id: The chunk ID from rlm_context_query (required)
+
+        Returns:
+            ToolResult with GetChunkResult containing:
+                - chunk_id: The requested chunk ID
+                - found: Whether the chunk was found
+                - title: Section title
+                - content: Full section content
+                - file: Source file path
+                - lines: Start and end line numbers
+                - token_count: Content token count
+                - message: Optional message (e.g., "Chunk not found or expired")
+        """
+        chunk_id = params.get("chunk_id", "")
+
+        if not chunk_id:
+            return ToolResult(
+                data=GetChunkResult(
+                    chunk_id="",
+                    found=False,
+                    message="chunk_id is required",
+                ).model_dump(),
+                input_tokens=0,
+                output_tokens=0,
+            )
+
+        # Retrieve from cache
+        chunk_data = self.get_chunk(chunk_id)
+
+        if not chunk_data:
+            return ToolResult(
+                data=GetChunkResult(
+                    chunk_id=chunk_id,
+                    found=False,
+                    message="Chunk not found or expired. Re-run rlm_context_query with return_references=True.",
+                ).model_dump(),
+                input_tokens=0,
+                output_tokens=0,
+            )
+
+        result = GetChunkResult(
+            chunk_id=chunk_id,
+            found=True,
+            title=chunk_data.get("title", ""),
+            content=chunk_data.get("content", ""),
+            file=chunk_data.get("file", ""),
+            lines=chunk_data.get("lines"),
+            token_count=chunk_data.get("token_count", 0),
+        )
+
+        return ToolResult(
+            data=result.model_dump(),
+            input_tokens=0,
+            output_tokens=result.token_count,
         )
