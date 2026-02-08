@@ -244,6 +244,45 @@ _CONCEPTUAL_PREFIXES = (
 )
 
 # ---------------------------------------------------------------------------
+# List/Enumeration Query Detection
+# ---------------------------------------------------------------------------
+# Queries asking for lists of items (articles, tasks, features) should boost
+# sections with numbered patterns like "### Article #1", "1. First item", etc.
+# This improves ranking for "what are the next articles to write" type queries.
+_LIST_QUERY_PATTERNS = frozenset({
+    "what are the",
+    "list the",
+    "list all",
+    "which",
+    "what to write",
+    "what to do",
+    "next articles",
+    "next tasks",
+    "next steps",
+    "upcoming",
+    "planned",
+    "todo",
+    "to-do",
+    "roadmap",
+})
+
+# Patterns in section titles/content that indicate enumerated list items
+# These get boosted when a list query is detected
+_NUMBERED_SECTION_PATTERNS = (
+    r"^#+\s*(?:article|task|step|item|feature|issue|bug|story)\s*#?\d+",  # ### Article #1
+    r"^#+\s*\d+[\.\):]",  # ## 1. or ## 1) or ## 1:
+    r"^\d+[\.\)]",  # 1. or 1) at start
+    r"#\d+\b",  # #1, #2, etc.
+)
+
+# Terms indicating planned/unpublished/future content
+# Boost sections containing these when query asks about "next" or "planned" items
+_PLANNED_CONTENT_MARKERS = frozenset({
+    "📝", "unpublished", "planned", "draft", "todo", "upcoming",
+    "next:", "status:", "wip", "in progress", "pending",
+})
+
+# ---------------------------------------------------------------------------
 # Query Expansion: Abstract terms → concrete keywords for better search recall
 # ---------------------------------------------------------------------------
 # Abstract queries like "architecture" miss specific sections because they don't
@@ -361,6 +400,41 @@ def _is_abstract_query(query: str) -> bool:
             return True
     # Also check for conceptual prefixes
     return any(query_lower.startswith(p) for p in _CONCEPTUAL_PREFIXES)
+
+
+def _is_list_query(query: str) -> bool:
+    """Check if query is asking for a list/enumeration of items.
+
+    List queries like "what are the next articles to write" should boost
+    sections with numbered patterns (Article #1, 1. First item, etc.)
+    over prose/template sections that happen to contain matching keywords.
+    """
+    query_lower = query.lower()
+    return any(pattern in query_lower for pattern in _LIST_QUERY_PATTERNS)
+
+
+def _is_numbered_section(title: str, content: str) -> bool:
+    """Check if section title matches numbered/enumerated patterns.
+
+    Returns True for sections like:
+    - "### Article #1: Title"
+    - "## 1. First Item"
+    - "### Step 3: Implementation"
+    """
+    title_lower = title.lower()
+    for pattern in _NUMBERED_SECTION_PATTERNS:
+        if re.search(pattern, title_lower, re.IGNORECASE):
+            return True
+    return False
+
+
+def _has_planned_content_markers(content: str) -> bool:
+    """Check if content contains markers indicating planned/unpublished status.
+
+    Matches sections with 📝, "Status: Unpublished", "Draft", etc.
+    """
+    content_lower = content.lower()
+    return any(marker in content_lower for marker in _PLANNED_CONTENT_MARKERS)
 
 
 # Plans that have access to semantic search features
@@ -2136,10 +2210,34 @@ class RLMEngine:
         keywords = [w for w in re.findall(r"\w+", query.lower()) if w not in _STOP_WORDS]
         scored: list[tuple[Section, float]] = []
 
+        # Detect list/enumeration queries for numbered section boosting
+        is_list_query = _is_list_query(query)
+        is_planned_query = any(
+            term in query.lower() for term in ("next", "planned", "upcoming", "todo", "write")
+        )
+        if is_list_query:
+            logger.info(f"List query detected: '{query[:60]}...' - boosting numbered sections")
+
         # Calculate keyword scores for all sections (always in-memory, fast)
         keyword_scores: dict[str, float] = {}
         for section in self.index.sections:
-            keyword_scores[section.id] = self._calculate_keyword_score(section, keywords)
+            base_score = self._calculate_keyword_score(section, keywords)
+
+            # Boost numbered sections for list queries (Fix #1: Query-intent detection)
+            # E.g., "Article #3" should rank higher than "Example Article Structure"
+            # for queries like "what are the next articles to write"
+            if is_list_query and base_score > 0:
+                if _is_numbered_section(section.title, section.content):
+                    base_score *= 2.0  # 2x boost for numbered sections
+                    logger.debug(f"Numbered section boost: '{section.title}' → {base_score:.1f}")
+
+                # Boost sections with planned/unpublished markers (Fix #3: Semantic grounding)
+                # E.g., sections with "📝 Unpublished" should rank higher for "next articles"
+                if is_planned_query and _has_planned_content_markers(section.content):
+                    base_score *= 1.5  # 1.5x boost for planned content
+                    logger.debug(f"Planned content boost: '{section.title}' → {base_score:.1f}")
+
+            keyword_scores[section.id] = base_score
 
         # Handle different search modes
         if search_mode == SearchMode.KEYWORD:
