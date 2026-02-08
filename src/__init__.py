@@ -1,3 +1,3 @@
-"""Snipara Server - Self-hostable Context Optimization Server for LLMs."""
+"""RLM MCP Server - Hosted MCP endpoint for RLM SaaS."""
 
 __version__ = "2.0.1"

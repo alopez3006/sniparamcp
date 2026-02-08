@@ -519,11 +519,36 @@ The search returned limited results. Please:
 """
 
 # Minimum token budget for conceptual queries (to reduce hallucination)
-CONCEPTUAL_QUERY_MIN_TOKENS = 4000
+CONCEPTUAL_QUERY_MIN_TOKENS = 5000
+# Minimum token budget for multi-hop queries (require combining info from multiple sections)
+MULTI_HOP_QUERY_MIN_TOKENS = 6000
 # Score threshold below which we consider results "low confidence"
 LOW_CONFIDENCE_SCORE_THRESHOLD = 15.0
 # Token budget expansion factor when confidence is low
 LOW_CONFIDENCE_TOKEN_MULTIPLIER = 1.5
+
+# Multi-hop query patterns - queries that require combining info from multiple sections
+_MULTI_HOP_PATTERNS = (
+    "trace the",
+    "full flow",
+    "and back",
+    "end to end",
+    "end-to-end",
+    "step by step",
+    "step-by-step",
+    "all the",
+    "how do they differ",
+    "how do they relate",
+    "what are all",
+    "compare all",
+    "difference between",
+    "from start to",
+    "from beginning to",
+    "complete flow",
+    "entire flow",
+    "chain of",
+    "sequence of",
+)
 
 # Internal/debug path patterns - sections from these paths get score penalties
 # because they contain project internals, debug logs, and session data that
@@ -1559,8 +1584,19 @@ class RLMEngine:
         # This reduces hallucination by maintaining clear source attribution
         return_references = params.get("return_references", False)
 
-        # Detect conceptual queries and boost token budget to reduce hallucination
+        # Detect complex queries and boost token budget to reduce hallucination
         query_lower = query.lower()
+
+        # Multi-hop queries need the most context (combining info from multiple sections)
+        is_multi_hop_query = any(p in query_lower for p in _MULTI_HOP_PATTERNS)
+        if is_multi_hop_query and max_tokens < MULTI_HOP_QUERY_MIN_TOKENS:
+            logger.info(
+                f"Multi-hop query detected, boosting token budget: "
+                f"{max_tokens} → {MULTI_HOP_QUERY_MIN_TOKENS}"
+            )
+            max_tokens = MULTI_HOP_QUERY_MIN_TOKENS
+
+        # Conceptual queries need more context than default
         is_conceptual_query = any(query_lower.startswith(p) for p in _CONCEPTUAL_PREFIXES)
         if is_conceptual_query and max_tokens < CONCEPTUAL_QUERY_MIN_TOKENS:
             logger.info(

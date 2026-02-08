@@ -22,8 +22,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Chunking configuration
-MAX_CHUNK_TOKENS = 512  # Max tokens per chunk
-CHUNK_OVERLAP_TOKENS = 50  # Overlap between chunks
+# Increased from 512 to 768 for better context per chunk (most embedding models support 1024)
+MAX_CHUNK_TOKENS = 768  # Max tokens per chunk
+CHUNK_OVERLAP_TOKENS = 80  # Overlap between chunks (increased for better continuity)
 MIN_CHUNK_TOKENS = 50  # Minimum tokens for a chunk
 
 
@@ -307,7 +308,15 @@ class DocumentIndexer:
             is_paragraph_break = line.strip() == "" and i > 0
             is_approaching_limit = current_tokens >= MAX_CHUNK_TOKENS - CHUNK_OVERLAP_TOKENS
 
-            if is_paragraph_break and is_approaching_limit:
+            # Force split if we've significantly exceeded the limit (even mid-paragraph)
+            force_split = current_tokens >= MAX_CHUNK_TOKENS + 100
+
+            if (is_paragraph_break and is_approaching_limit) or force_split:
+                # If force splitting, try to end at sentence boundary
+                if force_split and not is_paragraph_break:
+                    current_content = self._truncate_at_sentence(current_content, MAX_CHUNK_TOKENS)
+                    current_tokens = self._estimate_tokens(current_content)
+
                 # Create chunk
                 if current_tokens >= MIN_CHUNK_TOKENS:
                     chunks.append(Chunk(
@@ -349,6 +358,33 @@ class DocumentIndexer:
                 )
 
         return chunks
+
+    def _truncate_at_sentence(self, content: str, max_tokens: int) -> str:
+        """Truncate content at sentence boundary within token budget."""
+        max_chars = max_tokens * 4  # Rough estimate: 4 chars per token
+
+        if len(content) <= max_chars:
+            return content
+
+        # Find last sentence ending before max_chars
+        truncated = content[:max_chars]
+        sentence_endings = [". ", ".\n", "! ", "!\n", "? ", "?\n"]
+        best_end = -1
+
+        for ending in sentence_endings:
+            pos = truncated.rfind(ending)
+            if pos > best_end and pos > len(truncated) * 0.5:
+                best_end = pos + len(ending)
+
+        if best_end > 0:
+            return truncated[:best_end].rstrip()
+
+        # Fall back to word boundary
+        last_space = truncated.rfind(" ")
+        if last_space > len(truncated) * 0.7:
+            return truncated[:last_space].rstrip()
+
+        return truncated.rstrip()
 
     def _estimate_tokens(self, text: str) -> int:
         """Estimate token count (rough approximation: ~4 chars per token)."""
