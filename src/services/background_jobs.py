@@ -339,7 +339,7 @@ async def create_index_job(
             "project_id": project_id,
             "status": row["status"].lower(),
             "progress": row["progress"],
-            "created_at": row["createdAt"].isoformat() if row["createdAt"] else None,
+            "created_at": row["createdAt"] if row["createdAt"] else None,
             "already_exists": True,
         }
 
@@ -363,7 +363,7 @@ async def create_index_job(
         "project_id": row["projectId"],
         "status": row["status"].lower(),
         "progress": row["progress"],
-        "created_at": row["createdAt"].isoformat() if row["createdAt"] else None,
+        "created_at": row["createdAt"] if row["createdAt"] else None,
         "already_exists": False,
     }
 
@@ -400,10 +400,10 @@ async def get_job_status(db: Prisma, project_id: str, job_id: str) -> dict | Non
         "retry_count": row["retryCount"],
         "max_retries": row["maxRetries"],
         "worker_id": row["workerId"],
-        "created_at": row["createdAt"].isoformat() if row["createdAt"] else None,
-        "started_at": row["startedAt"].isoformat() if row["startedAt"] else None,
-        "completed_at": row["completedAt"].isoformat() if row["completedAt"] else None,
-        "updated_at": row["updatedAt"].isoformat() if row["updatedAt"] else None,
+        "created_at": row["createdAt"] if row["createdAt"] else None,
+        "started_at": row["startedAt"] if row["startedAt"] else None,
+        "completed_at": row["completedAt"] if row["completedAt"] else None,
+        "updated_at": row["updatedAt"] if row["updatedAt"] else None,
         "triggered_by": row["triggeredBy"],
         "triggered_via": row["triggeredVia"],
         "results": row["results"],
