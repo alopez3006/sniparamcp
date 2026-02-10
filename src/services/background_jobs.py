@@ -28,17 +28,20 @@ logger = logging.getLogger(__name__)
 JOB_POLL_INTERVAL = 10  # seconds between polling
 JOB_STALE_TIMEOUT = 300  # 5 min - reclaim if worker crashed
 MAX_CONCURRENT_JOBS = 2  # per worker
+AUTO_DISCOVERY_INTERVAL = 300  # 5 min - scan for unindexed documents
 
 # Global state
 _running = False
 _processor_task: asyncio.Task | None = None
+_discovery_task: asyncio.Task | None = None
 _active_jobs: set[str] = set()
 _worker_id: str = f"worker-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+_last_discovery: datetime | None = None
 
 
 async def start_job_processor(db: Prisma) -> None:
     """Start the background job processor loop."""
-    global _running, _processor_task
+    global _running, _processor_task, _discovery_task
 
     if _running:
         logger.warning("Job processor already running")
@@ -46,21 +49,24 @@ async def start_job_processor(db: Prisma) -> None:
 
     _running = True
     _processor_task = asyncio.create_task(_job_processor_loop(db))
+    _discovery_task = asyncio.create_task(_auto_discovery_loop(db))
     logger.info(f"Job processor started (worker_id={_worker_id})")
 
 
 async def stop_job_processor() -> None:
     """Stop the background job processor."""
-    global _running, _processor_task
+    global _running, _processor_task, _discovery_task
 
     _running = False
-    if _processor_task:
-        _processor_task.cancel()
-        try:
-            await _processor_task
-        except asyncio.CancelledError:
-            pass
-        _processor_task = None
+    for task in [_processor_task, _discovery_task]:
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+    _processor_task = None
+    _discovery_task = None
     logger.info("Job processor stopped")
 
 
@@ -78,6 +84,103 @@ async def _job_processor_loop(db: Prisma) -> None:
             logger.error(f"Error in job processor loop: {e}")
 
         await asyncio.sleep(JOB_POLL_INTERVAL)
+
+
+async def _auto_discovery_loop(db: Prisma) -> None:
+    """
+    Periodically scan for projects with unindexed documents and create index jobs.
+
+    This ensures all projects eventually get indexed, even if the webhook-based
+    indexing fails (e.g., due to misconfigured MCP_INTERNAL_SECRET).
+    """
+    global _last_discovery
+
+    # Wait a bit before first discovery to let the server stabilize
+    await asyncio.sleep(60)
+
+    while _running:
+        try:
+            now = datetime.now(UTC)
+
+            # Find projects with documents that have no chunks
+            # Use a single efficient query that:
+            # 1. Groups by project
+            # 2. Counts docs with 0 chunks
+            # 3. Only returns projects with unindexed docs
+            # 4. Excludes projects that already have pending/running jobs
+            projects_needing_index = await db.query_raw(
+                """
+                WITH doc_stats AS (
+                    SELECT
+                        d."projectId",
+                        COUNT(*) FILTER (
+                            WHERE NOT EXISTS (
+                                SELECT 1 FROM document_chunks dc WHERE dc."documentId" = d.id
+                            )
+                        ) as unindexed_count
+                    FROM documents d
+                    GROUP BY d."projectId"
+                    HAVING COUNT(*) FILTER (
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM document_chunks dc WHERE dc."documentId" = d.id
+                        )
+                    ) > 0
+                ),
+                pending_jobs AS (
+                    SELECT DISTINCT "projectId"
+                    FROM index_jobs
+                    WHERE status IN ('PENDING', 'RUNNING')
+                )
+                SELECT
+                    ds."projectId",
+                    ds.unindexed_count,
+                    p.name as project_name,
+                    p.slug as project_slug
+                FROM doc_stats ds
+                JOIN projects p ON ds."projectId" = p.id
+                LEFT JOIN pending_jobs pj ON ds."projectId" = pj."projectId"
+                WHERE pj."projectId" IS NULL
+                ORDER BY ds.unindexed_count DESC
+                LIMIT 10
+                """
+            )
+
+            if projects_needing_index:
+                logger.info(
+                    f"Auto-discovery found {len(projects_needing_index)} projects "
+                    f"with unindexed documents"
+                )
+
+                for proj in projects_needing_index:
+                    try:
+                        # Create an incremental index job
+                        result = await db.query_raw(
+                            """
+                            INSERT INTO index_jobs
+                            (id, "projectId", status, progress, "indexMode", "createdAt", "updatedAt", "triggeredBy", "triggeredVia")
+                            VALUES (gen_random_uuid()::text, $1, 'PENDING', 0, 'INCREMENTAL'::"IndexJobMode", NOW(), NOW(), 'system', 'auto_discovery')
+                            RETURNING id
+                            """,
+                            proj["projectId"],
+                        )
+                        job_id = result[0]["id"] if result else None
+                        logger.info(
+                            f"Created auto-discovery index job {job_id} for "
+                            f"project {proj['project_slug']} ({proj['unindexed_count']} unindexed docs)"
+                        )
+                    except Exception as e:
+                        # Job might already exist due to race condition - that's OK
+                        if "unique constraint" not in str(e).lower():
+                            logger.error(
+                                f"Failed to create index job for {proj['project_slug']}: {e}"
+                            )
+
+            _last_discovery = now
+
+        except Exception as e:
+            logger.error(f"Error in auto-discovery loop: {e}")
+
+        await asyncio.sleep(AUTO_DISCOVERY_INTERVAL)
 
 
 async def _claim_next_job(db: Prisma) -> IndexJob | None:
