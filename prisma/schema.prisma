@@ -308,6 +308,7 @@ model Project {
   githubLastCommitSha String?
   githubSyncEnabled   Boolean   @default(false)
   githubWebhookId     String?   // GitHub webhook ID for auto-sync
+  githubWebhookSecret String?   // Per-project webhook secret for signature verification
 
   // Automation settings
   automationClient      String  @default("claude-code") // claude-code, cursor, continue, windsurf, codex, custom
@@ -351,6 +352,9 @@ model Project {
   agentMemories  AgentMemory[]
   memoryStats    MemoryStats?
   agentSwarms    AgentSwarm[]
+
+  // Indexing jobs
+  indexJobs      IndexJob[]
 
   @@unique([teamId, slug])
   @@map("projects")
@@ -410,6 +414,52 @@ model DocumentChunk {
 
   @@index([documentId])
   @@map("document_chunks")
+}
+
+// ============================================
+// Indexing Jobs (Background Processing)
+// ============================================
+
+enum IndexJobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+model IndexJob {
+  id                 String         @id @default(cuid())
+  projectId          String
+  project            Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  status             IndexJobStatus @default(PENDING)
+  progress           Int            @default(0) // 0-100
+  errorMessage       String?
+
+  documentsTotal     Int            @default(0)
+  documentsProcessed Int            @default(0)
+  chunksCreated      Int            @default(0)
+
+  retryCount         Int            @default(0)
+  maxRetries         Int            @default(3)
+
+  workerId           String?
+
+  createdAt          DateTime       @default(now())
+  startedAt          DateTime?
+  completedAt        DateTime?
+  updatedAt          DateTime       @updatedAt
+
+  triggeredBy        String?
+  triggeredVia       String?
+
+  results            Json?
+
+  @@index([projectId, createdAt])
+  @@index([status, createdAt])
+  @@index([workerId])
+  @@map("index_jobs")
 }
 
 // ============================================
@@ -714,11 +764,8 @@ model Subscription {
   currentPeriodStart   DateTime?
   currentPeriodEnd     DateTime?
   cancelAtPeriodEnd    Boolean            @default(false)
-
-  // 30-day PRO boost for new users
   proBoostStartedAt    DateTime?
   proBoostEndsAt       DateTime?
-
   createdAt            DateTime           @default(now())
   updatedAt            DateTime           @updatedAt
 
@@ -1311,42 +1358,46 @@ enum AgentsPlan {
 }
 
 model AgentsSubscription {
-  id                    String      @id @default(cuid())
+  id                    String          @id @default(cuid())
   userId                String
   teamId                String?
 
   // Plan info
-  plan                  AgentsPlan  @default(STARTER)
-  status                String      @default("active") // active, canceled, past_due
+  plan                  AgentsPlan      @default(STARTER)
+  status                String          @default("active") // active, canceled, past_due
+  billingInterval       BillingInterval @default(MONTHLY)
 
   // Stripe
-  stripeSubscriptionId  String?     @unique
+  stripeSubscriptionId  String?         @unique
   stripeCustomerId      String?
   stripePriceId         String?
 
   // Usage limits (from plan)
-  memoryLimit           Int         @default(1000)
-  swarmLimit            Int         @default(1)
-  agentsPerSwarmLimit   Int         @default(2)
-  cacheTtlSeconds       Int         @default(300)
+  memoryLimit           Int             @default(1000)
+  swarmLimit            Int             @default(1)
+  agentsPerSwarmLimit   Int             @default(2)
+  cacheTtlSeconds       Int             @default(300)
 
   // Current usage
-  currentMemoryCount    Int         @default(0)
-  currentSwarmCount     Int         @default(0)
+  currentMemoryCount    Int             @default(0)
+  currentSwarmCount     Int             @default(0)
 
   // Billing cycle
   currentPeriodStart    DateTime?
   currentPeriodEnd      DateTime?
 
+  // Boost
+  starterBoostEndsAt    DateTime?
+
   // Grace period for Context plan requirement (Agents TEAM/ENTERPRISE needs Context TEAM/ENTERPRISE)
   gracePeriodEnd        DateTime?
   gracePeriodReason     String?
 
-  createdAt             DateTime    @default(now())
-  updatedAt             DateTime    @updatedAt
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
 
-  user                  User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  team                  Team?       @relation(fields: [teamId], references: [id])
+  user                  User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  team                  Team?           @relation(fields: [teamId], references: [id])
 
   @@unique([userId, teamId])
   @@index([stripeSubscriptionId])

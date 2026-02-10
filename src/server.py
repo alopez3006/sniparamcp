@@ -42,7 +42,6 @@ from .models import (
 )
 from .rlm_engine import RLMEngine, count_tokens
 from .services.agent_memory import semantic_recall, store_memory
-from .services.indexer import get_indexer
 from .usage import (
     check_ip_rate_limit,
     check_rate_limit,
@@ -255,8 +254,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Embedding model preload failed (will retry on first use): {e}")
 
+    # Start background job processor for async indexing
+    from .services.background_jobs import start_job_processor, stop_job_processor
+
+    db = await get_db()
+    await start_job_processor(db)
+
     yield
     # Shutdown
+    await stop_job_processor()
     await close_db()
     await close_redis()
 
@@ -1076,11 +1082,11 @@ async def reindex_project(
     x_internal_secret: Annotated[str | None, Header(alias="X-Internal-Secret")] = None,
 ):
     """
-    Trigger re-indexing of all documents in a project.
+    Trigger async re-indexing of all documents in a project.
 
-    This creates or updates document chunks with embeddings for
-    semantic search. Call this after syncing documents from GitHub
-    or bulk uploading documents.
+    This creates an index job that processes documents in the background.
+    The endpoint returns immediately with a job ID that can be used to
+    check progress via GET /v1/{project_id}/reindex/{job_id}.
 
     Supports two authentication methods:
     1. X-API-Key header (normal API key authentication)
@@ -1092,11 +1098,14 @@ async def reindex_project(
         x_internal_secret: Internal secret for server-to-server calls (optional)
 
     Returns:
-        Results with document paths and chunk counts
+        Job info including job_id, status, and status_url for polling
     """
+    from .services.background_jobs import create_index_job
+
     db = await get_db()
 
     # Check authentication - either API key or internal secret
+    triggered_via = None
     if x_internal_secret:
         # Internal server-to-server authentication
         if not settings.internal_api_secret:
@@ -1111,8 +1120,77 @@ async def reindex_project(
             project = await db.project.find_first(where={"slug": project_id})
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
+        triggered_via = "internal"
     elif x_api_key:
         # Normal API key authentication
+        _, project, _, _ = await validate_and_rate_limit(project_id, x_api_key)
+        triggered_via = "api_key"
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required: X-API-Key or X-Internal-Secret header"
+        )
+
+    # Create index job (returns immediately)
+    job = await create_index_job(
+        db,
+        project.id,
+        triggered_by=None,  # Could add user ID if available
+        triggered_via=triggered_via,
+    )
+
+    logger.info(f"Created index job {job['id']} for project {project.id}")
+
+    return {
+        "job_id": job["id"],
+        "project_id": project.id,
+        "status": job["status"],
+        "progress": job.get("progress", 0),
+        "created_at": job.get("created_at"),
+        "status_url": f"/v1/{project.id}/reindex/{job['id']}",
+        "already_exists": job.get("already_exists", False),
+    }
+
+
+@app.get("/v1/{project_id}/reindex/{job_id}", tags=["MCP"])
+async def get_reindex_status(
+    project_id: str,
+    job_id: str,
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+    x_internal_secret: Annotated[str | None, Header(alias="X-Internal-Secret")] = None,
+):
+    """
+    Get the status of an indexing job.
+
+    Use this endpoint to poll for job completion after triggering
+    a reindex via POST /v1/{project_id}/reindex.
+
+    Args:
+        project_id: The project ID or slug
+        job_id: The job ID returned from the POST endpoint
+        x_api_key: API key from X-API-Key header (optional)
+        x_internal_secret: Internal secret for server-to-server calls (optional)
+
+    Returns:
+        Job status including progress, documents processed, chunks created, etc.
+    """
+    from .services.background_jobs import get_job_status
+
+    db = await get_db()
+
+    # Check authentication - either API key or internal secret
+    if x_internal_secret:
+        if not settings.internal_api_secret:
+            raise HTTPException(status_code=500, detail="Internal API secret not configured")
+        if x_internal_secret != settings.internal_api_secret:
+            raise HTTPException(status_code=401, detail="Invalid internal secret")
+
+        project = await db.project.find_first(where={"id": project_id})
+        if not project:
+            project = await db.project.find_first(where={"slug": project_id})
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+    elif x_api_key:
         _, project, _, _ = await validate_and_rate_limit(project_id, x_api_key)
     else:
         raise HTTPException(
@@ -1120,19 +1198,12 @@ async def reindex_project(
             detail="Authentication required: X-API-Key or X-Internal-Secret header"
         )
 
-    # Get indexer and run indexing
-    indexer = await get_indexer(db)
-    results = await indexer.index_project(project.id)
+    # Get job status
+    job = await get_job_status(db, project.id, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
 
-    total_chunks = sum(results.values())
-    logger.info(f"Reindexed project {project.id}: {len(results)} docs, {total_chunks} chunks")
-
-    return {
-        "project_id": project.id,
-        "documents_indexed": len(results),
-        "total_chunks": total_chunks,
-        "results": results,
-    }
+    return job
 
 
 # ============ MEMORY REST API (Automation Hooks) ============

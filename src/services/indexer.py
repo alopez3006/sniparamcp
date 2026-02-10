@@ -75,9 +75,9 @@ class DocumentIndexer:
             logger.info(f"No chunks generated for document: {document.path}")
             return 0
 
-        # Generate embeddings for all chunks
+        # Generate embeddings for all chunks (async to avoid blocking event loop)
         chunk_contents = [c.content for c in chunks]
-        embeddings = self.embeddings.embed_texts(chunk_contents)
+        embeddings = await self.embeddings.embed_texts_async(chunk_contents)
 
         # Insert chunks with embeddings using raw SQL (for vector type)
         for chunk, embedding in zip(chunks, embeddings):

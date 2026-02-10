@@ -1,7 +1,7 @@
 """Pydantic models for RLM MCP Server request/response schemas."""
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 # ============ ENUMS ============
 
 
-class ToolName(str, Enum):
+class ToolName(StrEnum):
     """Available RLM tools."""
 
     RLM_ASK = "rlm_ask"
@@ -68,7 +68,7 @@ class ToolName(str, Enum):
     RLM_GET_CHUNK = "rlm_get_chunk"
 
 
-class SearchMode(str, Enum):
+class SearchMode(StrEnum):
     """Search mode for context queries."""
 
     KEYWORD = "keyword"
@@ -76,7 +76,7 @@ class SearchMode(str, Enum):
     HYBRID = "hybrid"  # Future: keyword + semantic
 
 
-class Plan(str, Enum):
+class Plan(StrEnum):
     """Subscription plans."""
 
     FREE = "FREE"
@@ -402,7 +402,7 @@ class ContextQueryResult(BaseModel):
 # ============ RECURSIVE CONTEXT MODELS (Phase 4.5) ============
 
 
-class DecomposeStrategy(str, Enum):
+class DecomposeStrategy(StrEnum):
     """Strategy for query decomposition."""
 
     AUTO = "auto"  # Let the engine decide
@@ -410,7 +410,7 @@ class DecomposeStrategy(str, Enum):
     STRUCTURAL = "structural"  # Follow document structure
 
 
-class PlanStrategy(str, Enum):
+class PlanStrategy(StrEnum):
     """Strategy for execution planning."""
 
     BREADTH_FIRST = "breadth_first"
@@ -535,7 +535,7 @@ class PlanResult(BaseModel):
 # ============ SUMMARY STORAGE MODELS (Phase 4.6) ============
 
 
-class SummaryType(str, Enum):
+class SummaryType(StrEnum):
     """Type of summary stored."""
 
     CONCISE = "concise"  # Brief 1-2 sentence summary
@@ -630,7 +630,7 @@ class DeleteSummaryResult(BaseModel):
 # ============ SHARED CONTEXT MODELS (Phase 7) ============
 
 
-class DocumentCategoryEnum(str, Enum):
+class DocumentCategoryEnum(StrEnum):
     """Document category for token budget allocation."""
 
     MANDATORY = "MANDATORY"
@@ -743,7 +743,7 @@ class GetTemplateResult(BaseModel):
 # ============ AGENT MEMORY MODELS (Phase 8.2) ============
 
 
-class AgentMemoryType(str, Enum):
+class AgentMemoryType(StrEnum):
     """Type of agent memory."""
 
     FACT = "fact"  # Objective information
@@ -754,7 +754,7 @@ class AgentMemoryType(str, Enum):
     CONTEXT = "context"  # General session context
 
 
-class AgentMemoryScope(str, Enum):
+class AgentMemoryScope(StrEnum):
     """Scope of agent memory visibility."""
 
     AGENT = "agent"  # Specific to one agent/session
@@ -1197,3 +1197,57 @@ class RequestAccessResult(BaseModel):
     status: str = Field(default="pending", description="Request status")
     message: str = Field(..., description="Human-readable status message")
     dashboard_url: str = Field(..., description="URL to view request status")
+
+
+# ============ INDEX JOB MODELS (Async Indexing) ============
+
+
+class IndexJobStatus(StrEnum):
+    """Status of an index job."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class IndexJobCreateResponse(BaseModel):
+    """Response from creating an index job."""
+
+    job_id: str = Field(..., description="Unique job identifier")
+    project_id: str = Field(..., description="Project being indexed")
+    status: IndexJobStatus = Field(..., description="Current job status")
+    progress: int = Field(default=0, ge=0, le=100, description="Progress percentage (0-100)")
+    created_at: datetime | None = Field(default=None, description="Job creation time")
+    status_url: str = Field(..., description="URL to poll for job status")
+    already_exists: bool = Field(
+        default=False, description="Whether a job already existed for this project"
+    )
+
+
+class IndexJobStatusResponse(BaseModel):
+    """Response from checking index job status."""
+
+    id: str = Field(..., alias="job_id", description="Job ID")
+    project_id: str = Field(..., description="Project being indexed")
+    status: IndexJobStatus = Field(..., description="Current job status")
+    progress: int = Field(default=0, ge=0, le=100, description="Progress percentage (0-100)")
+    error_message: str | None = Field(default=None, description="Error message if failed")
+    documents_total: int = Field(default=0, ge=0, description="Total documents to index")
+    documents_processed: int = Field(default=0, ge=0, description="Documents processed so far")
+    chunks_created: int = Field(default=0, ge=0, description="Total chunks created")
+    retry_count: int = Field(default=0, ge=0, description="Number of retries")
+    max_retries: int = Field(default=3, ge=0, description="Maximum retries allowed")
+    worker_id: str | None = Field(default=None, description="Worker processing this job")
+    created_at: datetime | None = Field(default=None, description="Job creation time")
+    started_at: datetime | None = Field(default=None, description="When processing started")
+    completed_at: datetime | None = Field(default=None, description="When job completed")
+    updated_at: datetime | None = Field(default=None, description="Last update time")
+    triggered_by: str | None = Field(default=None, description="User who triggered the job")
+    triggered_via: str | None = Field(
+        default=None, description="How the job was triggered (api_key, internal)"
+    )
+    results: dict[str, int] | None = Field(
+        default=None, description="Results mapping document paths to chunk counts"
+    )
