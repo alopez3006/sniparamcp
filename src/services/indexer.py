@@ -76,8 +76,11 @@ class DocumentIndexer:
             return 0
 
         # Generate embeddings for all chunks (async to avoid blocking event loop)
+        # Use longer timeout for indexing (300s) since large docs may have many chunks
         chunk_contents = [c.content for c in chunks]
-        embeddings = await self.embeddings.embed_texts_async(chunk_contents)
+        embeddings = await self.embeddings.embed_texts_async(
+            chunk_contents, timeout=300.0
+        )
 
         # Insert chunks with embeddings using raw SQL (for vector type)
         for chunk, embedding in zip(chunks, embeddings):
