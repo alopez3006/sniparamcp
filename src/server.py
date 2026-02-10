@@ -1078,15 +1078,24 @@ async def get_stats(
 @app.post("/v1/{project_id}/reindex", tags=["MCP"])
 async def reindex_project(
     project_id: str,
+    mode: str = Query(
+        default="incremental",
+        description="Index mode: 'incremental' (only unindexed docs) or 'full' (all docs)",
+        regex="^(incremental|full)$",
+    ),
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
     x_internal_secret: Annotated[str | None, Header(alias="X-Internal-Secret")] = None,
 ):
     """
-    Trigger async re-indexing of all documents in a project.
+    Trigger async re-indexing of documents in a project.
 
     This creates an index job that processes documents in the background.
     The endpoint returns immediately with a job ID that can be used to
     check progress via GET /v1/{project_id}/reindex/{job_id}.
+
+    Index modes:
+    - incremental (default): Only index documents that don't have chunks yet
+    - full: Re-index all documents (deletes existing chunks first)
 
     Supports two authentication methods:
     1. X-API-Key header (normal API key authentication)
@@ -1094,11 +1103,12 @@ async def reindex_project(
 
     Args:
         project_id: The project ID or slug
+        mode: Index mode - "incremental" or "full"
         x_api_key: API key from X-API-Key header (optional)
         x_internal_secret: Internal secret for server-to-server calls (optional)
 
     Returns:
-        Job info including job_id, status, and status_url for polling
+        Job info including job_id, status, index_mode, and status_url for polling
     """
     from .services.background_jobs import create_index_job
 
@@ -1131,21 +1141,26 @@ async def reindex_project(
             detail="Authentication required: X-API-Key or X-Internal-Secret header"
         )
 
+    # Map mode to IndexJobMode enum value
+    index_mode = "FULL" if mode == "full" else "INCREMENTAL"
+
     # Create index job (returns immediately)
     job = await create_index_job(
         db,
         project.id,
         triggered_by=None,  # Could add user ID if available
         triggered_via=triggered_via,
+        index_mode=index_mode,
     )
 
-    logger.info(f"Created index job {job['id']} for project {project.id}")
+    logger.info(f"Created index job {job['id']} for project {project.id} (mode={index_mode})")
 
     return {
         "job_id": job["id"],
         "project_id": project.id,
         "status": job["status"],
         "progress": job.get("progress", 0),
+        "index_mode": job.get("index_mode", "INCREMENTAL").lower(),
         "created_at": job.get("created_at"),
         "status_url": f"/v1/{project.id}/reindex/{job['id']}",
         "already_exists": job.get("already_exists", False),

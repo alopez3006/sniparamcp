@@ -103,16 +103,21 @@ class DocumentIndexer:
         logger.info(f"Indexed document {document.path}: {len(chunks)} chunks")
         return len(chunks)
 
-    async def index_project(self, project_id: str) -> dict[str, int]:
+    async def index_project(self, project_id: str, incremental: bool = False) -> dict[str, int]:
         """
-        Index all documents in a project.
+        Index documents in a project.
 
         Args:
             project_id: The project ID to index.
+            incremental: If True, only index documents without existing chunks.
+                        If False (default), re-index all documents.
 
         Returns:
             Dict mapping document paths to chunk counts.
         """
+        if incremental:
+            return await self._index_unindexed_documents(project_id)
+
         documents = await self.db.document.find_many(
             where={"projectId": project_id}
         )
@@ -124,6 +129,53 @@ class DocumentIndexer:
 
         total_chunks = sum(results.values())
         logger.info(f"Indexed project {project_id}: {len(documents)} docs, {total_chunks} chunks")
+        return results
+
+    async def _index_unindexed_documents(self, project_id: str) -> dict[str, int]:
+        """
+        Index only documents that don't have any chunks yet.
+
+        This is useful for:
+        - Newly synced documents from GitHub
+        - Manually added documents in the dashboard
+        - Documents that failed to index previously
+
+        Args:
+            project_id: The project ID to index.
+
+        Returns:
+            Dict mapping document paths to chunk counts.
+        """
+        # Find documents without any chunks using a LEFT JOIN
+        unindexed_docs = await self.db.query_raw(
+            '''
+            SELECT d.id, d.path
+            FROM documents d
+            LEFT JOIN document_chunks dc ON d.id = dc."documentId"
+            WHERE d."projectId" = $1
+            GROUP BY d.id, d.path
+            HAVING COUNT(dc.id) = 0
+            ORDER BY d.path
+            ''',
+            project_id,
+        )
+
+        if not unindexed_docs:
+            logger.info(f"No unindexed documents found for project {project_id}")
+            return {}
+
+        logger.info(f"Found {len(unindexed_docs)} unindexed documents for project {project_id}")
+
+        results: dict[str, int] = {}
+        for doc in unindexed_docs:
+            chunk_count = await self.index_document(doc["id"])
+            results[doc["path"]] = chunk_count
+
+        total_chunks = sum(results.values())
+        logger.info(
+            f"Incremental index for project {project_id}: "
+            f"{len(unindexed_docs)} docs, {total_chunks} chunks"
+        )
         return results
 
     async def search_similar(

@@ -111,7 +111,7 @@ async def _claim_next_job(db: Prisma) -> IndexJob | None:
             LIMIT 1
             FOR UPDATE SKIP LOCKED
         )
-        RETURNING id, "projectId", status, progress, "documentsTotal", "documentsProcessed",
+        RETURNING id, "projectId", status, progress, "indexMode", "documentsTotal", "documentsProcessed",
                   "chunksCreated", "retryCount", "maxRetries", "errorMessage",
                   "createdAt", "startedAt", "completedAt", "updatedAt",
                   "triggeredBy", "triggeredVia", "workerId", results
@@ -157,19 +157,48 @@ async def _process_job_wrapper(db: Prisma, job: dict) -> None:
 
 
 async def _process_index_job(db: Prisma, job: dict) -> None:
-    """Process an index job by indexing all project documents."""
+    """Process an index job by indexing project documents.
+
+    Supports two modes:
+    - FULL: Re-index all documents (deletes existing chunks)
+    - INCREMENTAL: Only index documents without existing chunks
+    """
     from .indexer import DocumentIndexer
 
     job_id = job["id"]
     project_id = job["projectId"]
+    index_mode = job.get("indexMode", "INCREMENTAL")  # Default to incremental
 
-    logger.info(f"Processing index job {job_id} for project {project_id}")
+    logger.info(f"Processing index job {job_id} for project {project_id} (mode={index_mode})")
 
-    # Get documents for this project
-    documents = await db.document.find_many(where={"projectId": project_id})
+    # Create indexer
+    indexer = DocumentIndexer(db)
+
+    if index_mode == "INCREMENTAL":
+        # Get only documents without chunks
+        documents = await db.query_raw(
+            '''
+            SELECT d.id, d.path
+            FROM documents d
+            LEFT JOIN document_chunks dc ON d.id = dc."documentId"
+            WHERE d."projectId" = $1
+            GROUP BY d.id, d.path
+            HAVING COUNT(dc.id) = 0
+            ORDER BY d.path
+            ''',
+            project_id,
+        )
+        # Convert to list of dicts with id/path
+        documents = [{"id": doc["id"], "path": doc["path"]} for doc in documents]
+    else:
+        # Get all documents
+        docs = await db.document.find_many(where={"projectId": project_id})
+        documents = [{"id": doc.id, "path": doc.path} for doc in docs]
+
     total_docs = len(documents)
 
     if total_docs == 0:
+        logger.info(f"No documents to index for job {job_id} (mode={index_mode})")
         await _complete_job(db, job_id, 0, 0, {})
         return
 
@@ -184,9 +213,6 @@ async def _process_index_job(db: Prisma, job: dict) -> None:
         job_id,
     )
 
-    # Create indexer
-    indexer = DocumentIndexer(db)
-
     # Index each document with progress updates
     results: dict[str, int] = {}
     total_chunks = 0
@@ -194,12 +220,12 @@ async def _process_index_job(db: Prisma, job: dict) -> None:
 
     for doc in documents:
         try:
-            chunk_count = await indexer.index_document(doc.id)
-            results[doc.path] = chunk_count
+            chunk_count = await indexer.index_document(doc["id"])
+            results[doc["path"]] = chunk_count
             total_chunks += chunk_count
         except Exception as e:
-            logger.error(f"Error indexing document {doc.path}: {e}")
-            results[doc.path] = 0
+            logger.error(f"Error indexing document {doc['path']}: {e}")
+            results[doc["path"]] = 0
 
         processed += 1
 
@@ -313,16 +339,28 @@ async def create_index_job(
     project_id: str,
     triggered_by: str | None = None,
     triggered_via: str | None = None,
+    index_mode: str = "INCREMENTAL",
 ) -> dict:
     """
     Create a new index job for a project.
 
+    Args:
+        db: Prisma database connection.
+        project_id: The project ID to index.
+        triggered_by: User ID or "system", "webhook".
+        triggered_via: "api_key", "internal", "dashboard".
+        index_mode: "INCREMENTAL" (only unindexed docs) or "FULL" (all docs).
+
     Returns the created job data.
     """
+    # Validate index_mode
+    if index_mode not in ("INCREMENTAL", "FULL"):
+        index_mode = "INCREMENTAL"
+
     # Check if there's already a pending/running job for this project
     existing = await db.query_raw(
         """
-        SELECT id, status, progress, "createdAt"
+        SELECT id, status, progress, "indexMode", "createdAt"
         FROM index_jobs
         WHERE "projectId" = $1 AND status IN ('PENDING', 'RUNNING')
         ORDER BY "createdAt" DESC
@@ -339,6 +377,7 @@ async def create_index_job(
             "project_id": project_id,
             "status": row["status"].lower(),
             "progress": row["progress"],
+            "index_mode": row.get("indexMode", "INCREMENTAL"),
             "created_at": row["createdAt"] if row["createdAt"] else None,
             "already_exists": True,
         }
@@ -346,23 +385,25 @@ async def create_index_job(
     # Create new job
     result = await db.query_raw(
         """
-        INSERT INTO index_jobs (id, "projectId", status, progress, "createdAt", "updatedAt", "triggeredBy", "triggeredVia")
-        VALUES (gen_random_uuid()::text, $1, 'PENDING', 0, NOW(), NOW(), $2, $3)
-        RETURNING id, "projectId", status, progress, "createdAt"
+        INSERT INTO index_jobs (id, "projectId", status, progress, "indexMode", "createdAt", "updatedAt", "triggeredBy", "triggeredVia")
+        VALUES (gen_random_uuid()::text, $1, 'PENDING', 0, $2, NOW(), NOW(), $3, $4)
+        RETURNING id, "projectId", status, progress, "indexMode", "createdAt"
         """,
         project_id,
+        index_mode,
         triggered_by,
         triggered_via,
     )
 
     row = result[0]
-    logger.info(f"Created index job {row['id']} for project {project_id}")
+    logger.info(f"Created index job {row['id']} for project {project_id} (mode={index_mode})")
 
     return {
         "id": row["id"],
         "project_id": row["projectId"],
         "status": row["status"].lower(),
         "progress": row["progress"],
+        "index_mode": row["indexMode"],
         "created_at": row["createdAt"] if row["createdAt"] else None,
         "already_exists": False,
     }
@@ -372,7 +413,7 @@ async def get_job_status(db: Prisma, project_id: str, job_id: str) -> dict | Non
     """Get the status of an index job."""
     result = await db.query_raw(
         """
-        SELECT id, "projectId", status, progress, "errorMessage",
+        SELECT id, "projectId", status, progress, "indexMode", "errorMessage",
                "documentsTotal", "documentsProcessed", "chunksCreated",
                "retryCount", "maxRetries", "workerId",
                "createdAt", "startedAt", "completedAt", "updatedAt",
@@ -393,6 +434,7 @@ async def get_job_status(db: Prisma, project_id: str, job_id: str) -> dict | Non
         "project_id": row["projectId"],
         "status": row["status"].lower(),
         "progress": row["progress"],
+        "index_mode": row.get("indexMode", "INCREMENTAL"),
         "error_message": row["errorMessage"],
         "documents_total": row["documentsTotal"],
         "documents_processed": row["documentsProcessed"],
