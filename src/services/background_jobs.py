@@ -386,7 +386,7 @@ async def create_index_job(
     result = await db.query_raw(
         """
         INSERT INTO index_jobs (id, "projectId", status, progress, "indexMode", "createdAt", "updatedAt", "triggeredBy", "triggeredVia")
-        VALUES (gen_random_uuid()::text, $1, 'PENDING', 0, $2, NOW(), NOW(), $3, $4)
+        VALUES (gen_random_uuid()::text, $1, 'PENDING', 0, $2::"IndexJobMode", NOW(), NOW(), $3, $4)
         RETURNING id, "projectId", status, progress, "indexMode", "createdAt"
         """,
         project_id,
