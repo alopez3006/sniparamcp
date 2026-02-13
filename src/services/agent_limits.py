@@ -67,14 +67,17 @@ PLAN_LIMITS = {
 DEFAULT_LIMITS = PLAN_LIMITS["STARTER"]
 
 
-async def get_agents_subscription(project_id: str) -> dict[str, Any] | None:
+async def get_agents_subscription(
+    project_id: str, user_id: str | None = None
+) -> dict[str, Any] | None:
     """Get the agents subscription for a project.
 
     First tries to find by team (if project belongs to team),
-    then falls back to project owner's personal subscription.
+    then falls back to user's personal subscription.
 
     Args:
         project_id: The project ID
+        user_id: The authenticated user's ID (used for personal subscription lookup)
 
     Returns:
         Subscription dict or None if no subscription
@@ -107,17 +110,26 @@ async def get_agents_subscription(project_id: str) -> dict[str, Any] | None:
         if team_sub:
             return _subscription_to_dict(team_sub)
 
-    # Fall back to project owner's subscription
-    # Get project owner from team members or API key owner
-    team_member = await db.teammember.find_first(
-        where={
-            "teamId": project.teamId,
-            "role": "OWNER",
-        },
-    ) if project.teamId else None
+        # Fall back to team owner's personal subscription
+        team_member = await db.teammember.find_first(
+            where={
+                "teamId": project.teamId,
+                "role": "OWNER",
+            },
+        )
+        if team_member:
+            owner_sub = await db.agentssubscription.find_first(
+                where={
+                    "userId": team_member.userId,
+                    "teamId": None,  # Personal subscription
+                    "status": "active",
+                },
+            )
+            if owner_sub:
+                return _subscription_to_dict(owner_sub)
 
-    user_id = team_member.userId if team_member else None
-
+    # Fall back to authenticated user's personal subscription
+    # This handles projects without teams (most common case for individual users)
     if user_id:
         user_sub = await db.agentssubscription.find_first(
             where={
@@ -160,17 +172,20 @@ def get_plan_limits(plan: str) -> dict[str, Any]:
     return PLAN_LIMITS.get(plan.upper(), DEFAULT_LIMITS)
 
 
-async def check_memory_limits(project_id: str) -> tuple[bool, str | None]:
+async def check_memory_limits(
+    project_id: str, user_id: str | None = None
+) -> tuple[bool, str | None]:
     """Check if project can create new memories.
 
     Args:
         project_id: The project ID
+        user_id: The authenticated user's ID (used for personal subscription lookup)
 
     Returns:
         Tuple of (allowed, error_message)
     """
     db = await get_db()
-    subscription = await get_agents_subscription(project_id)
+    subscription = await get_agents_subscription(project_id, user_id)
 
     # Get limit from subscription or use default
     if subscription:
@@ -193,17 +208,20 @@ async def check_memory_limits(project_id: str) -> tuple[bool, str | None]:
     return True, None
 
 
-async def check_swarm_limits(project_id: str) -> tuple[bool, str | None]:
+async def check_swarm_limits(
+    project_id: str, user_id: str | None = None
+) -> tuple[bool, str | None]:
     """Check if project can create new swarms.
 
     Args:
         project_id: The project ID
+        user_id: The authenticated user's ID (used for personal subscription lookup)
 
     Returns:
         Tuple of (allowed, error_message)
     """
     db = await get_db()
-    subscription = await get_agents_subscription(project_id)
+    subscription = await get_agents_subscription(project_id, user_id)
 
     # Get limit from subscription or use default
     if subscription:
@@ -481,18 +499,20 @@ async def check_grace_period(
 
 async def validate_agents_access(
     project_id: str,
+    user_id: str | None = None,
 ) -> tuple[bool, str | None, str | None]:
     """Full validation for agents access including Context plan and grace period.
 
     Args:
         project_id: The project ID
+        user_id: The authenticated user's ID (used for personal subscription lookup)
 
     Returns:
         Tuple of (allowed, error_message, warning_message)
         - error_message is set if access is denied
         - warning_message is set if in grace period (access allowed but expiring)
     """
-    agents_subscription = await get_agents_subscription(project_id)
+    agents_subscription = await get_agents_subscription(project_id, user_id)
 
     if not agents_subscription:
         return True, None, None  # No agents subscription = use defaults

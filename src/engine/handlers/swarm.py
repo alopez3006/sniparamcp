@@ -65,6 +65,7 @@ async def handle_swarm_create(
         description=description,
         max_agents=max_agents,
         config=config,
+        user_id=ctx.user_id,
     )
 
     return ToolResult(

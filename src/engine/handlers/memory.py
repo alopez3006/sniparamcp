@@ -55,7 +55,7 @@ async def handle_remember(
         )
 
     # Check memory limits
-    allowed, error = await check_memory_limits(ctx.project_id)
+    allowed, error = await check_memory_limits(ctx.project_id, ctx.user_id)
     if not allowed:
         return ToolResult(
             data={"error": error, "upgrade_url": "/billing/upgrade"},

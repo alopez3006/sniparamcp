@@ -36,6 +36,7 @@ async def create_swarm(
     description: str | None = None,
     max_agents: int = 10,
     config: dict[str, Any] | None = None,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     """Create a new agent swarm.
 
@@ -45,12 +46,13 @@ async def create_swarm(
         description: Optional description
         max_agents: Maximum agents allowed in swarm
         config: Optional swarm configuration
+        user_id: The authenticated user's ID (for subscription lookup)
 
     Returns:
         Dict with swarm info and status
     """
     # Check limits
-    allowed, error = await check_swarm_limits(project_id)
+    allowed, error = await check_swarm_limits(project_id, user_id)
     if not allowed:
         return {
             "success": False,
