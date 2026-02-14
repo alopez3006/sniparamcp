@@ -78,7 +78,9 @@ MCP_VERSION = "2024-11-05"
 # ============ REQUEST HANDLERS ============
 
 
-async def handle_call_tool(id: Any, params: dict, project_id: str, plan: Plan) -> dict:
+async def handle_call_tool(
+    id: Any, params: dict, project_id: str, plan: Plan, access_level: str = "EDITOR"
+) -> dict:
     """Handle MCP tools/call request.
 
     Executes a tool through the RLMEngine and tracks usage.
@@ -90,6 +92,7 @@ async def handle_call_tool(id: Any, params: dict, project_id: str, plan: Plan) -
             - arguments: Tool-specific arguments
         project_id: Database project ID
         plan: Subscription plan for rate limiting
+        access_level: API key access level (VIEWER, EDITOR, ADMIN)
 
     Returns:
         JSON-RPC response with tool result or error
@@ -103,7 +106,7 @@ async def handle_call_tool(id: Any, params: dict, project_id: str, plan: Plan) -
         return jsonrpc_error(id, -32602, f"Unknown tool: {tool_name}")
 
     try:
-        engine = RLMEngine(project_id, plan=plan)
+        engine = RLMEngine(project_id, plan=plan, access_level=access_level)
         result = await engine.execute(tool_enum, arguments)
 
         await track_usage(
@@ -136,7 +139,9 @@ async def handle_call_tool(id: Any, params: dict, project_id: str, plan: Plan) -
         return jsonrpc_error(id, -32000, str(e))
 
 
-async def handle_request(body: dict, project_id: str, plan: Plan) -> dict | None:
+async def handle_request(
+    body: dict, project_id: str, plan: Plan, access_level: str = "EDITOR"
+) -> dict | None:
     """Handle a single JSON-RPC request.
 
     Routes requests to appropriate handlers based on method.
@@ -151,6 +156,7 @@ async def handle_request(body: dict, project_id: str, plan: Plan) -> dict | None
         body: JSON-RPC request body
         project_id: Database project ID
         plan: Subscription plan
+        access_level: API key access level (VIEWER, EDITOR, ADMIN)
 
     Returns:
         JSON-RPC response dict, or None for notifications (requests without id)
@@ -172,7 +178,7 @@ async def handle_request(body: dict, project_id: str, plan: Plan) -> dict | None
     elif method == "tools/list":
         return jsonrpc_response(id, {"tools": TOOL_DEFINITIONS})
     elif method == "tools/call":
-        return await handle_call_tool(id, params, project_id, plan)
+        return await handle_call_tool(id, params, project_id, plan, access_level)
     elif method == "ping":
         return jsonrpc_response(id, {})
     else:
@@ -225,6 +231,9 @@ async def mcp_endpoint(
     if error:
         raise HTTPException(status_code=401 if "Invalid" in error else 429, detail=error)
 
+    # Extract access level from validated API key (defaults to EDITOR if not set)
+    access_level = api_key_info.get("access_level", "EDITOR") if api_key_info else "EDITOR"
+
     try:
         body = await request.json()
     except Exception:
@@ -232,10 +241,10 @@ async def mcp_endpoint(
 
     # Use actual database ID for all operations (not URL slug)
     if isinstance(body, list):
-        responses = [r for req in body if (r := await handle_request(req, actual_project_id, plan))]
+        responses = [r for req in body if (r := await handle_request(req, actual_project_id, plan, access_level))]
         return JSONResponse(responses)
 
-    response = await handle_request(body, actual_project_id, plan)
+    response = await handle_request(body, actual_project_id, plan, access_level)
     return JSONResponse(response) if response else Response(status_code=204)
 
 
