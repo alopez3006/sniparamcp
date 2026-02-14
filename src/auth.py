@@ -470,6 +470,13 @@ async def get_project_settings(project_id_or_slug: str) -> dict | None:
         "max_tokens_per_query": project.maxTokensPerQuery,
         "search_mode": project.searchMode,
         "include_summaries": project.includeSummaries,
+        # Memory injection settings (Agents feature)
+        "memory_injection_enabled": getattr(project, "memoryInjectionEnabled", False),
+        "memory_inject_types": getattr(project, "memoryInjectTypes", None),
+        "memory_exclude_session_checkpoints": getattr(project, "memoryExcludeSessionCheckpoints", False),
+        "memory_min_confidence": getattr(project, "memoryMinConfidence", 0.2),
+        "memory_recall_query": getattr(project, "memoryRecallQuery", None),
+        "memory_save_on_commit": getattr(project, "memorySaveOnCommit", False),
     }
 
 
